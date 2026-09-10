@@ -50,10 +50,28 @@ in
     inherit (final.pkgsBuildBuild) cmake ninja;
   };
 
+  # `logos_ios_export_symbols()`: the app-side half of ADR 0006, where the
+  # symbols a dlopened Bare module resolves upward are forced into the app
+  # image and exported from it. Its own store path rather than a file in the
+  # stage, because the target that needs it is the app executable, and on iOS
+  # that is linked by Xcode outside nix -- so the impure half has to be able to
+  # `include()` the same module the pure half saw. mkIosCmakeStage passes the
+  # dir as -DLOGOS_IOS_CMAKE_DIR and repeats it in passthru for that hand-off.
+  logosIosSymbolExports = final.pkgsBuildBuild.runCommandLocal "logos-ios-symbol-exports-cmake" { } ''
+    mkdir -p $out
+    cp ${./LogosIosSymbolExports.cmake} $out/LogosIosSymbolExports.cmake
+  '';
+
   # An app's static-archive stage: `pkgs.mkIosCmakeStage { pname; version;
-  # src; sourceDir ? "."; cmakeFlags ? []; buildInputs ? []; ... }`.
+  # src; sourceDir ? "."; cmakeFlags ? []; buildInputs ? []; exportedSymbols ?
+  # []; exportedSymbolFiles ? []; ... }`.
   mkIosCmakeStage = final.callPackage ./cmake-stage.nix {
-    inherit (final) xcodeClang logosQtCrossToolchainFile logosQtCrossCmakeFlags;
+    inherit (final)
+      xcodeClang
+      logosQtCrossToolchainFile
+      logosQtCrossCmakeFlags
+      logosIosSymbolExports
+      ;
   };
 
   qt6 = prev.qt6.overrideScope (
