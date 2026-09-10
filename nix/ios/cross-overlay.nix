@@ -57,12 +57,15 @@ let
   # xcodeWrapper on PATH or exporting SDKROOT would also reach any BUILD-platform
   # compile happening in the same shell -- see logosRustCrossSetup for what that
   # costs.
-  # `xcrun`, and only `xcrun`, with DEVELOPER_DIR baked into the invocation.
-  # For a build script that reaches for it by name; see logosRustCrossSetup.
+  #
+  # Two spellings of that, for two kinds of caller. `xcrunShim` is `xcrun` and
+  # only `xcrun`, on PATH, with DEVELOPER_DIR baked into the invocation -- for a
+  # build script that reaches for it by name (see logosRustCrossSetup).
   xcrunShim = final.pkgsBuildBuild.writeShellScriptBin "xcrun" ''
     exec env DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" /usr/bin/xcrun "$@"
   '';
 
+  # `xcrunPreamble` is the shell-function form, for the setup snippets below.
   xcrunPreamble = ''
     _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
     _sdkroot="$(_xcrun --show-sdk-path)"
