@@ -12,6 +12,7 @@
   androidPkgs,
   logosQtCrossCmakeFlags,
   logosQtCrossToolchainFile,
+  logosAndroidDtNeededGate,
   buildPackages,
 }:
 
@@ -178,34 +179,11 @@ stdenv.mkDerivation (finalAttrs: {
   # A DT_NEEDED that is neither packaged nor an NDK stub library for this API
   # level fails the build, not the device (measured: UnsatisfiedLinkError on
   # libb2.so on a real phone). Link-time sonames only; dlopen is out of scope.
+  # The rule itself lives in ./dt-needed-gate.sh, so one artifact can be gated
+  # the moment it is built and not only once it reaches an APK.
   postBuild = ''
-    pushd android-build/libs/${abi}
-
-    printf '%s\n' *.so | sort -u > "$NIX_BUILD_TOP/packaged.txt"
-    ls ${androidPkgs.ndkStubLibDir}/*.so | xargs -n1 basename | sort -u \
-      > "$NIX_BUILD_TOP/android.txt"
-    # An empty allowlist would pass everything.
-    [ -s "$NIX_BUILD_TOP/android.txt" ] || {
-      echo "mkQtAndroidApk: no NDK stub libraries under ${androidPkgs.ndkStubLibDir}" >&2
-      exit 1
-    }
-    sort -u "$NIX_BUILD_TOP/packaged.txt" "$NIX_BUILD_TOP/android.txt" \
-      > "$NIX_BUILD_TOP/allowed.txt"
-
-    ${androidPkgs.ndkToolchainBin}/llvm-readelf -d ./*.so \
-      | sed -n 's/.*(NEEDED).*Shared library: \[\(.*\)\]/\1/p' \
-      | sort -u > "$NIX_BUILD_TOP/needed.txt"
-
-    if ! foreign=$(comm -23 "$NIX_BUILD_TOP/needed.txt" "$NIX_BUILD_TOP/allowed.txt") \
-       || [ -n "$foreign" ]; then
-      echo "mkQtAndroidApk: these DT_NEEDED sonames are neither in the APK nor" >&2
-      echo "provided by Android at API ${androidPkgs.apiLevel}:" >&2
-      printf '  %s\n' $foreign >&2
-      exit 1
-    fi
-    echo "mkQtAndroidApk: $(wc -l < "$NIX_BUILD_TOP/needed.txt") DT_NEEDED sonames, all resolvable on device"
-
-    popd
+    ${logosAndroidDtNeededGate}/bin/logos-android-dt-needed-gate \
+      android-build/libs/${abi}/*.so
   '';
 
   installPhase = ''
