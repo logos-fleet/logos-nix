@@ -45,6 +45,23 @@ let
 
   # cargo's spelling of the same platform, which is not clang's.
   rustTarget = "aarch64-apple-ios" + lib.optionalString (appleSdk == "iphonesimulator") "-sim";
+  # The two spellings of `rustTarget` that appear in environment variable
+  # names: cargo keys CARGO_TARGET_<T>_* off the triple with dashes turned into
+  # underscores and upper-cased, cc-rs keys CC_/CXX_/AR_/CFLAGS_ off the same
+  # triple lower-cased.
+  rustTargetVar = builtins.replaceStrings [ "-" ] [ "_" ] rustTarget;
+  rustTargetVarUpper = lib.toUpper rustTargetVar;
+
+  # Resolving the toolchain out of Xcode, shared by the Rust and Nim setups.
+  # BY ABSOLUTE PATH, with DEVELOPER_DIR passed per invocation: putting
+  # xcodeWrapper on PATH or exporting SDKROOT would also reach any BUILD-platform
+  # compile happening in the same shell -- see logosRustCrossSetup for what that
+  # costs.
+  xcrunPreamble = ''
+    _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
+    _sdkroot="$(_xcrun --show-sdk-path)"
+    [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
+  '';
 in
 {
   xcodeWrapper = final.pkgsBuildBuild.callPackage ./xcode-wrapper.nix {
@@ -95,7 +112,8 @@ in
   # A SHELL SNIPPET, not an attrset of store paths, because the iOS toolchain
   # is Xcode's and is only knowable at build time through `xcrun` (ADR 0002).
   # Android's half of this contract is the same two attribute names, so a
-  # consumer writes one code path for both. Needs xcodeWrapper on PATH.
+  # consumer writes one code path for both. Deliberately does NOT need
+  # xcodeWrapper on PATH -- see the body.
   logosRustCrossTarget = lib.optionalString isCross rustTarget;
   logosRustCrossSetup = lib.optionalString isCross ''
     # Nothing here touches the process environment the BUILD half runs in, and
@@ -107,29 +125,25 @@ in
     #     architecture arm64" while building for macOS);
     #   * putting xcodeWrapper on PATH shadows nixpkgs' clang/ar/ranlib/nm with
     #     Xcode's for the host half too, with the same shape of failure.
-    # So xcrun is called by absolute path, DEVELOPER_DIR is passed to it per
-    # invocation, and every result is keyed to the TARGET triple.
-    _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
-    _sdkroot="$(_xcrun --show-sdk-path)"
-    [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
+    # So every result below is keyed to the TARGET triple, and xcrun is reached
+    # the way xcrunPreamble describes.
+    ${xcrunPreamble}
     _clang="$(_xcrun --find clang)"
     _clangxx="$(_xcrun --find clang++)"
 
     export CARGO_BUILD_TARGET=${rustTarget}
-    # cargo keys the linker off the triple with dashes turned into underscores
-    # and upper-cased; cc-rs keys CC_/CXX_/AR_/CFLAGS_ off the same triple
-    # lower-cased. Without the cc-rs half a build script compiles its bundled C
-    # for the BUILDER and the link fails on undefined symbols -- silently,
-    # because the archive is still produced.
-    export CARGO_TARGET_${builtins.replaceStrings [ "-" ] [ "_" ] (lib.toUpper rustTarget)}_LINKER="$_clang"
+    # Both halves are needed: without the cc-rs one a build script compiles its
+    # bundled C for the BUILDER and the link fails on undefined symbols --
+    # silently, because the archive is still produced.
+    export CARGO_TARGET_${rustTargetVarUpper}_LINKER="$_clang"
     # rustc would normally read the SDK out of SDKROOT; it is not exported, so
     # the target link is told where it is directly.
-    export CARGO_TARGET_${builtins.replaceStrings [ "-" ] [ "_" ] (lib.toUpper rustTarget)}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=-target -Clink-arg=${triple}"
-    export CC_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$_clang"
-    export CXX_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$_clangxx"
-    export AR_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$(_xcrun --find ar)"
-    export CFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $_sdkroot"
-    export CXXFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $_sdkroot"
+    export CARGO_TARGET_${rustTargetVarUpper}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=-target -Clink-arg=${triple}"
+    export CC_${rustTargetVar}="$_clang"
+    export CXX_${rustTargetVar}="$_clangxx"
+    export AR_${rustTargetVar}="$(_xcrun --find ar)"
+    export CFLAGS_${rustTargetVar}="-target ${triple} -isysroot $_sdkroot"
+    export CXXFLAGS_${rustTargetVar}="-target ${triple} -isysroot $_sdkroot"
   '';
 
   # ── cross-compiling a Nim project for this set ─────────────────────────
@@ -141,12 +155,7 @@ in
     "--cc:clang"
   ];
   logosNimCrossSetup = lib.optionalString isCross ''
-    # By absolute path, and DEVELOPER_DIR per invocation, for the same reason
-    # logosRustCrossSetup does it: nothing here may reach a host-platform
-    # compile that happens in the same shell.
-    _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
-    _sdkroot="$(_xcrun --show-sdk-path)"
-    [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
+    ${xcrunPreamble}
     nimFlagsArray+=(
       "--clang.exe=$(_xcrun --find clang)"
       "--clang.cpp.exe=$(_xcrun --find clang++)"

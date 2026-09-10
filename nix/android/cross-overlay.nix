@@ -189,9 +189,9 @@ lib.optionalAttrs isCross {
       buildToolsVersion
       ndkVersion
       ;
-    # The NDK's own binutils; the APK derivation reads DT_NEEDED with it.
-    inherit ndkToolchainBin;
-    inherit ndkStubLibDir;
+    # The NDK's own binutils and the API level's stub libraries, for any
+    # consumer that has to read or check a shipped .so itself.
+    inherit ndkToolchainBin ndkStubLibDir;
   };
 
   # ── the platform, named ────────────────────────────────────────────────
@@ -244,11 +244,11 @@ lib.optionalAttrs isCross {
   # The "no unbundled system libs" gate, with this set's NDK baked in.
   #
   # A runnable script rather than a bare path so that every consumer -- the APK
-  # derivation, a Bare module's installCheck -- gates against the SAME stub set
-  # and the same readelf, and none of them has to know where the NDK lives.
+  # derivation, a single cross-built .so -- gates against the SAME stub set and
+  # the same readelf, and none of them has to know where the NDK lives.
   logosAndroidDtNeededGate = buildPkgs.writeShellApplication {
     name = "logos-android-dt-needed-gate";
-    runtimeInputs = [ buildPkgs.bash buildPkgs.coreutils buildPkgs.findutils buildPkgs.gnused ];
+    runtimeInputs = [ buildPkgs.bash buildPkgs.coreutils buildPkgs.gnused ];
     text = ''
       export LOGOS_ANDROID_READELF="''${LOGOS_ANDROID_READELF:-${ndkToolchainBin}/llvm-readelf}"
       # Overridable so the gate's own mutation check can hand it a stub set it

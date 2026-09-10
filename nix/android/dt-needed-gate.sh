@@ -68,23 +68,33 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# The sonames of the shared libraries directly in a directory; nothing if there
+# are none. A loop rather than `ls | xargs basename` so an empty directory and
+# a missing one are the same quiet answer instead of a suppressed error.
+sonames_in() {
+    local f
+    for f in "$1"/*.so; do
+        [ -e "$f" ] && basename "$f"
+    done
+    return 0
+}
+
 # ── the allowlist ───────────────────────────────────────────────────────────
 # An empty stub set would pass everything, so refuse to gate against one.
-ls "$STUB_DIR"/*.so 2>/dev/null | xargs -n1 basename | sort -u > "$work/android.txt"
+sonames_in "$STUB_DIR" | sort -u > "$work/android.txt"
 if [ ! -s "$work/android.txt" ]; then
     echo "logos-android-dt-needed-gate: no NDK stub libraries under $STUB_DIR;" \
          "refusing to gate against an empty allowlist." >&2
     exit 2
 fi
-: > "$work/packaged.txt"
-for d in "${allow_dirs[@]}"; do
-    [ -d "$d" ] || continue
-    ls "$d"/*.so 2>/dev/null | xargs -n1 basename >> "$work/packaged.txt"
-done
-if [ ${#allow_sonames[@]} -gt 0 ]; then
-    printf '%s\n' "${allow_sonames[@]}" >> "$work/packaged.txt"
-fi
-sort -u "$work/packaged.txt" -o "$work/packaged.txt"
+{
+    for d in "${allow_dirs[@]}"; do
+        sonames_in "$d"
+    done
+    if [ ${#allow_sonames[@]} -gt 0 ]; then
+        printf '%s\n' "${allow_sonames[@]}"
+    fi
+} | sort -u > "$work/packaged.txt"
 sort -u "$work/packaged.txt" "$work/android.txt" > "$work/allowed.txt"
 
 # ── what the linker recorded ────────────────────────────────────────────────
@@ -92,12 +102,18 @@ sort -u "$work/packaged.txt" "$work/android.txt" > "$work/allowed.txt"
     | sed -n 's/.*(NEEDED).*Shared library: \[\(.*\)\]/\1/p' \
     | sort -u > "$work/needed.txt"
 
-foreign=$(comm -23 "$work/needed.txt" "$work/allowed.txt")
+# A comm that fails would leave $foreign empty, i.e. would PASS: the one
+# outcome a gate must never reach by accident.
+foreign=$(comm -23 "$work/needed.txt" "$work/allowed.txt") || {
+    echo "logos-android-dt-needed-gate: could not compare the DT_NEEDED set" \
+         "against the allowlist; refusing to report a pass." >&2
+    exit 2
+}
 if [ -n "$foreign" ]; then
     echo "logos-android-dt-needed-gate: FAIL — these DT_NEEDED sonames are" \
          "neither shipped beside the artifact nor provided by Android at API" \
          "$API_LEVEL:" >&2
-    printf '  %s\n' $foreign >&2
+    printf '%s\n' "$foreign" | sed 's/^/  /' >&2
     echo "Link them into the artifact (static), or ship them next to it." >&2
     exit 1
 fi
