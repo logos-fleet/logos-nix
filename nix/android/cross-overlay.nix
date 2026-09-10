@@ -64,6 +64,15 @@ let
 
   ndkSysroot = "${ndkRoot}/toolchains/llvm/prebuilt/${ndkHostTag}/sysroot";
 
+  # The NDK's own binutils and per-API clang wrappers. A let binding rather
+  # than only an `androidPkgs` field because the Rust and Nim cross wiring
+  # below names it too, and one spelling of the path is the point.
+  ndkToolchainBin = "${ndkRoot}/toolchains/llvm/prebuilt/${ndkHostTag}/bin";
+
+  # Exactly the shared libraries Android guarantees at this API level, which is
+  # the allowlist a shipped .so may name. Hoisted for the same reason.
+  ndkStubLibDir = "${ndkSysroot}/usr/lib/${ndkTriple}/${apiLevel}";
+
   # qt_auto_detect_apple() runs before qt_auto_detect_android() and its only
   # early-out is `if(NOT APPLE)`, which CMake answers from the HOST before
   # project() has looked at CMAKE_SYSTEM_NAME. So on a Mac it always runs, and
@@ -180,12 +189,49 @@ lib.optionalAttrs isCross {
       buildToolsVersion
       ndkVersion
       ;
-    # The NDK's own binutils; the APK derivation reads DT_NEEDED with it.
-    ndkToolchainBin = "${ndkRoot}/toolchains/llvm/prebuilt/${ndkHostTag}/bin";
-    # Exactly the shared libraries Android guarantees at this API level, which
-    # is the allowlist a shipped .so may name.
-    ndkStubLibDir = "${ndkSysroot}/usr/lib/${ndkTriple}/${apiLevel}";
+    # The NDK's own binutils and the API level's stub libraries, for any
+    # consumer that has to read or check a shipped .so itself.
+    inherit ndkToolchainBin ndkStubLibDir;
   };
+
+  # ── the platform, named ────────────────────────────────────────────────
+  # What a NON-Qt CMake project targeting this set needs: the NDK toolchain
+  # file plus the ABI/API pair. A Qt project gets the same through
+  # logosQtCrossCmakeFlags, so these are for everything else -- a Bare module
+  # among them, which by definition links no Qt at all.
+  logosAndroidCmakeTargetFlags = lib.optionals isCross ([
+    "-DCMAKE_TOOLCHAIN_FILE=${androidToolchainFile}"
+  ] ++ androidToolchainFlags);
+
+  # ── cross-compiling a Rust crate for this set ──────────────────────────
+  # The iOS overlay contributes the SAME two attribute names (a shell snippet,
+  # because Xcode is only knowable through xcrun at build time), so a consumer
+  # writes one code path for both mobile platforms.
+  logosRustCrossTarget = lib.optionalString isCross "aarch64-linux-android";
+  logosRustCrossSetup = lib.optionalString isCross ''
+    export CARGO_BUILD_TARGET=aarch64-linux-android
+    # The NDK's own per-API clang wrapper, not a bare clang: it is what bakes
+    # `--target=aarch64-linux-android${apiLevel}` and the sysroot in, and the
+    # API level has to be the same one every target dependency was built at.
+    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang
+    export CC_aarch64_linux_android=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang
+    export CXX_aarch64_linux_android=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang++
+    export AR_aarch64_linux_android=${ndkToolchainBin}/llvm-ar
+    export RANLIB_aarch64_linux_android=${ndkToolchainBin}/llvm-ranlib
+  '';
+
+  # ── cross-compiling a Nim project for this set ─────────────────────────
+  # Nim knows `android` as an OS; what it does not know is where the NDK is.
+  logosNimCrossFlags = lib.optionals isCross [
+    "--os:android"
+    "--cpu:arm64"
+    "--cc:clang"
+    "--clang.exe=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang"
+    "--clang.cpp.exe=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang++"
+    "--clang.linkerexe=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang"
+    "--clang.cpp.linkerexe=${ndkToolchainBin}/${ndkTriple}${apiLevel}-clang++"
+  ];
+  logosNimCrossSetup = "";
 
   # The build-platform Qt at the same version, for androiddeployqt and the rest
   # of the host tools. Named rather than reached through pkgsBuildBuild so a
@@ -194,6 +240,24 @@ lib.optionalAttrs isCross {
 
   # Qt CMake project -> debug-signed APK for this set's ABI; see mk-apk.nix.
   mkQtAndroidApk = final.callPackage ./mk-apk.nix { };
+
+  # The "no unbundled system libs" gate, with this set's NDK baked in.
+  #
+  # A runnable script rather than a bare path so that every consumer -- the APK
+  # derivation, a single cross-built .so -- gates against the SAME stub set and
+  # the same readelf, and none of them has to know where the NDK lives.
+  logosAndroidDtNeededGate = buildPkgs.writeShellApplication {
+    name = "logos-android-dt-needed-gate";
+    runtimeInputs = [ buildPkgs.bash buildPkgs.coreutils buildPkgs.gnused ];
+    text = ''
+      export LOGOS_ANDROID_READELF="''${LOGOS_ANDROID_READELF:-${ndkToolchainBin}/llvm-readelf}"
+      # Overridable so the gate's own mutation check can hand it a stub set it
+      # controls; nothing else has a reason to.
+      export LOGOS_ANDROID_STUB_LIB_DIR="''${LOGOS_ANDROID_STUB_LIB_DIR:-${ndkStubLibDir}}"
+      export LOGOS_ANDROID_API_LEVEL="''${LOGOS_ANDROID_API_LEVEL:-${apiLevel}}"
+      exec bash ${./dt-needed-gate.sh} "$@"
+    '';
+  };
 
   # `enableKTLS ? hostPlatform.isLinux` is true for Android, and bionic has none
   # of the kernel-TLS socket plumbing openssl's internal/ktls.h assumes

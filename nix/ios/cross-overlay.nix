@@ -36,6 +36,32 @@ let
   iosDeploymentTarget = "17";
 
   prefixPath = scope: lib.concatStringsSep ";" (map (m: "${scope.${m}}") qtModules);
+
+  # The clang target triple for this set's SDK. Single-sourced here because
+  # three consumers need the SAME one: the hand-rolled third-party archives,
+  # a plain (non-Qt) CMake project, and cargo's iOS target.
+  triple = "${arch}-apple-ios${iosDeploymentTarget}"
+    + lib.optionalString (appleSdk == "iphonesimulator") "-simulator";
+
+  # cargo's spelling of the same platform, which is not clang's.
+  rustTarget = "aarch64-apple-ios" + lib.optionalString (appleSdk == "iphonesimulator") "-sim";
+  # The two spellings of `rustTarget` that appear in environment variable
+  # names: cargo keys CARGO_TARGET_<T>_* off the triple with dashes turned into
+  # underscores and upper-cased, cc-rs keys CC_/CXX_/AR_/CFLAGS_ off the same
+  # triple lower-cased.
+  rustTargetVar = builtins.replaceStrings [ "-" ] [ "_" ] rustTarget;
+  rustTargetVarUpper = lib.toUpper rustTargetVar;
+
+  # Resolving the toolchain out of Xcode, shared by the Rust and Nim setups.
+  # BY ABSOLUTE PATH, with DEVELOPER_DIR passed per invocation: putting
+  # xcodeWrapper on PATH or exporting SDKROOT would also reach any BUILD-platform
+  # compile happening in the same shell -- see logosRustCrossSetup for what that
+  # costs.
+  xcrunPreamble = ''
+    _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
+    _sdkroot="$(_xcrun --show-sdk-path)"
+    [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
+  '';
 in
 {
   xcodeWrapper = final.pkgsBuildBuild.callPackage ./xcode-wrapper.nix {
@@ -57,6 +83,90 @@ in
     "-DQT_ADDITIONAL_HOST_PACKAGES_PREFIX_PATH=${prefixPath hostQt}"
     "-DQT_ADDITIONAL_PACKAGES_PREFIX_PATH=${prefixPath final.qt6}"
   ];
+
+  # ── the platform, named ────────────────────────────────────────────────
+  # What a NON-Qt project targeting this set needs. A Qt project gets the same
+  # from qt.toolchain.cmake, so these are for everything else -- a Bare module
+  # among them, which by definition links no Qt at all.
+  logosIosAppleSdk = appleSdk;
+  logosIosArch = arch;
+  logosIosDeploymentTarget = iosDeploymentTarget;
+  logosIosTriple = triple;
+  logosIosCmakeTargetFlags = lib.optionals isCross [
+    "-DCMAKE_SYSTEM_NAME=iOS"
+    "-DCMAKE_OSX_SYSROOT=${appleSdk}"
+    "-DCMAKE_OSX_ARCHITECTURES=${arch}"
+    "-DCMAKE_OSX_DEPLOYMENT_TARGET=${iosDeploymentTarget}"
+    # CMAKE_SYSTEM_NAME=iOS makes CMake cross-compiling, and cross-compiling
+    # re-roots find_package/find_path/find_library into CMAKE_FIND_ROOT_PATH --
+    # even a `PATHS ... NO_DEFAULT_PATH` one. Store paths are not under the
+    # SDK, so a header-only dependency (nlohmann_json, an installed CMake
+    # config package) goes from present to invisible. The Android toolchain
+    # file sets the same three for the same reason.
+    "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH"
+    "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH"
+    "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH"
+  ];
+
+  # ── cross-compiling a Rust crate for this set ──────────────────────────
+  # A SHELL SNIPPET, not an attrset of store paths, because the iOS toolchain
+  # is Xcode's and is only knowable at build time through `xcrun` (ADR 0002).
+  # Android's half of this contract is the same two attribute names, so a
+  # consumer writes one code path for both. Deliberately does NOT need
+  # xcodeWrapper on PATH -- see the body.
+  logosRustCrossTarget = lib.optionalString isCross rustTarget;
+  logosRustCrossSetup = lib.optionalString isCross ''
+    # Nothing here touches the process environment the BUILD half runs in, and
+    # that is the whole design. One cargo run compiles this crate's build
+    # scripts and proc macros for the build platform and the crate itself for
+    # the target, so anything process-wide reaches both:
+    #   * exporting SDKROOT=<iPhone SDK> makes the host half link against it
+    #     (measured: `quote`'s build script, "symbol(s) not found for
+    #     architecture arm64" while building for macOS);
+    #   * putting xcodeWrapper on PATH shadows nixpkgs' clang/ar/ranlib/nm with
+    #     Xcode's for the host half too, with the same shape of failure.
+    # So every result below is keyed to the TARGET triple, and xcrun is reached
+    # the way xcrunPreamble describes.
+    ${xcrunPreamble}
+    _clang="$(_xcrun --find clang)"
+    _clangxx="$(_xcrun --find clang++)"
+
+    export CARGO_BUILD_TARGET=${rustTarget}
+    # Both halves are needed: without the cc-rs one a build script compiles its
+    # bundled C for the BUILDER and the link fails on undefined symbols --
+    # silently, because the archive is still produced.
+    export CARGO_TARGET_${rustTargetVarUpper}_LINKER="$_clang"
+    # rustc would normally read the SDK out of SDKROOT; it is not exported, so
+    # the target link is told where it is directly.
+    export CARGO_TARGET_${rustTargetVarUpper}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=-target -Clink-arg=${triple}"
+    export CC_${rustTargetVar}="$_clang"
+    export CXX_${rustTargetVar}="$_clangxx"
+    export AR_${rustTargetVar}="$(_xcrun --find ar)"
+    export CFLAGS_${rustTargetVar}="-target ${triple} -isysroot $_sdkroot"
+    export CXXFLAGS_${rustTargetVar}="-target ${triple} -isysroot $_sdkroot"
+  '';
+
+  # ── cross-compiling a Nim project for this set ─────────────────────────
+  # Nim knows `ios` as an OS; what it does not know is where Xcode is, so the
+  # compiler and the SDK are passed in. Same two attribute names on Android.
+  logosNimCrossFlags = lib.optionals isCross [
+    "--os:ios"
+    "--cpu:arm64"
+    "--cc:clang"
+  ];
+  logosNimCrossSetup = lib.optionalString isCross ''
+    ${xcrunPreamble}
+    nimFlagsArray+=(
+      "--clang.exe=$(_xcrun --find clang)"
+      "--clang.cpp.exe=$(_xcrun --find clang++)"
+      "--clang.linkerexe=$(_xcrun --find clang)"
+      "--clang.cpp.linkerexe=$(_xcrun --find clang++)"
+      "--passC:-target ${triple}"
+      "--passC:-isysroot $_sdkroot"
+      "--passL:-target ${triple}"
+      "--passL:-isysroot $_sdkroot"
+    )
+  '';
 
   # How everything iOS compiles; qt-module.nix and mkIosCmakeStage share it.
   xcodeClang = final.callPackage ./xcode-clang.nix {

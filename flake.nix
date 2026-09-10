@@ -200,6 +200,18 @@
             pkgs = mkAndroidPkgs { buildSystem = androidBuildSystem; };
           };
         };
+      # cargo's spelling of each mobile pseudo-system. Needed OUTSIDE the target
+      # package set: a cross toolchain is chosen on the BUILD platform
+      # (`rust-bin...default.override { targets = [ ... ]; }`), before there is
+      # any target `pkgs` to read `logosRustCrossTarget` off. Inside a target
+      # set the overlay attribute is the one to use -- both are derived from
+      # the same platform, this one is just reachable earlier.
+      mobileRustTargets = {
+        aarch64-ios = "aarch64-apple-ios";
+        aarch64-ios-simulator = "aarch64-apple-ios-sim";
+        aarch64-android = "aarch64-linux-android";
+      };
+
       mobileTargets = mkMobileTargets { };
       mkForAllMobileTargets = targets: f:
         nixpkgs.lib.mapAttrs (system: t: f { inherit system; inherit (t) pkgs buildSystem; }) targets;
@@ -302,6 +314,7 @@
           androidAbi
           androidApiLevel
           mobileTargets
+          mobileRustTargets
           forAllMobileTargets
           mkMobileTargets
           mkForAllMobileTargets
@@ -793,6 +806,11 @@
           {
             android-overlay = assert androidGate;
               pkgs.runCommand "android-overlay-eval-gate" { } "touch $out";
+
+            # Does the DT_NEEDED gate still discriminate? Cheap: two tiny .so
+            # files off the NDK's clang, no Qt and no SDK download beyond the
+            # NDK the overlay already pins.
+            android-dt-needed-gate = a.callPackage ./nix/android/dt-needed-gate-check.nix { };
           }
           # A real APK is the only proof that androiddeployqt, gradle and the
           # lock still agree, but it builds Qt for Android from source, so a
