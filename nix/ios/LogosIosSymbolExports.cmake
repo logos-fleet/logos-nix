@@ -33,7 +33,7 @@
 # symbols of each module image, intersected with what the app's libraries
 # define. See docs/research/spikes/ios-dlopen-bare-module.md.
 
-if(NOT COMMAND logos_ios_export_symbols)
+include_guard(GLOBAL)
 
 function(logos_ios_export_symbols target)
     cmake_parse_arguments(PARSE_ARGV 1 arg
@@ -91,5 +91,3 @@ function(logos_ios_export_symbols target)
     file(GENERATE OUTPUT "${list_file}" CONTENT "${symbols_text}\n")
     target_link_options(${target} PRIVATE "LINKER:-exported_symbols_list,${list_file}")
 endfunction()
-
-endif()
