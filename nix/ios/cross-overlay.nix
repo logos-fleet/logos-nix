@@ -98,36 +98,36 @@ in
   # consumer writes one code path for both. Needs xcodeWrapper on PATH.
   logosRustCrossTarget = lib.optionalString isCross rustTarget;
   logosRustCrossSetup = lib.optionalString isCross ''
-    # DEVELOPER_DIR first, and it is load-bearing. A cargo cross build runs in
-    # the BUILD platform's stdenv so that the toolchain is runnable, and the
-    # Darwin cc-wrapper in that stdenv points DEVELOPER_DIR at nixpkgs' macOS
-    # SDK -- which contains no iPhone SDK, so `xcrun --sdk ${appleSdk}` answers
-    # "unable to find sdk" on STDOUT and exits 0. `set -e` never fires and the
-    # variable is set to an error message.
-    export DEVELOPER_DIR="${final.xcodeWrapper.developerDir}"
-    _sdkroot="$(xcrun --sdk ${appleSdk} --show-sdk-path)"
+    # Nothing here touches the process environment the BUILD half runs in, and
+    # that is the whole design. One cargo run compiles this crate's build
+    # scripts and proc macros for the build platform and the crate itself for
+    # the target, so anything process-wide reaches both:
+    #   * exporting SDKROOT=<iPhone SDK> makes the host half link against it
+    #     (measured: `quote`'s build script, "symbol(s) not found for
+    #     architecture arm64" while building for macOS);
+    #   * putting xcodeWrapper on PATH shadows nixpkgs' clang/ar/ranlib/nm with
+    #     Xcode's for the host half too, with the same shape of failure.
+    # So xcrun is called by absolute path, DEVELOPER_DIR is passed to it per
+    # invocation, and every result is keyed to the TARGET triple.
+    _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
+    _sdkroot="$(_xcrun --show-sdk-path)"
     [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
-    # SDKROOT is deliberately NOT exported. The same cargo run compiles this
-    # crate's build scripts and proc macros for the BUILD platform, and a
-    # process-wide SDKROOT pointing at the iPhone SDK makes those link against
-    # it -- measured: `quote`'s build script died on "symbol(s) not found for
-    # architecture arm64" while building for macOS. Everything below is keyed
-    # to the TARGET triple instead, so the host half is untouched.
+    _clang="$(_xcrun --find clang)"
+    _clangxx="$(_xcrun --find clang++)"
+
     export CARGO_BUILD_TARGET=${rustTarget}
-    _clang="$(xcrun --sdk ${appleSdk} --find clang)"
-    _clangxx="$(xcrun --sdk ${appleSdk} --find clang++)"
     # cargo keys the linker off the triple with dashes turned into underscores
     # and upper-cased; cc-rs keys CC_/CXX_/AR_/CFLAGS_ off the same triple
     # lower-cased. Without the cc-rs half a build script compiles its bundled C
     # for the BUILDER and the link fails on undefined symbols -- silently,
     # because the archive is still produced.
     export CARGO_TARGET_${builtins.replaceStrings [ "-" ] [ "_" ] (lib.toUpper rustTarget)}_LINKER="$_clang"
-    # rustc would normally read the SDK out of SDKROOT; it is not exported (see
-    # above), so the target link is told where it is directly.
+    # rustc would normally read the SDK out of SDKROOT; it is not exported, so
+    # the target link is told where it is directly.
     export CARGO_TARGET_${builtins.replaceStrings [ "-" ] [ "_" ] (lib.toUpper rustTarget)}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=-target -Clink-arg=${triple}"
     export CC_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$_clang"
     export CXX_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$_clangxx"
-    export AR_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$(xcrun --sdk ${appleSdk} --find ar)"
+    export AR_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$(_xcrun --find ar)"
     export CFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $_sdkroot"
     export CXXFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $_sdkroot"
   '';
@@ -141,18 +141,21 @@ in
     "--cc:clang"
   ];
   logosNimCrossSetup = lib.optionalString isCross ''
-    export DEVELOPER_DIR="${final.xcodeWrapper.developerDir}"
-    export SDKROOT="$(xcrun --sdk ${appleSdk} --show-sdk-path)"
-    [ -d "$SDKROOT" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $SDKROOT" >&2; exit 1; }
+    # By absolute path, and DEVELOPER_DIR per invocation, for the same reason
+    # logosRustCrossSetup does it: nothing here may reach a host-platform
+    # compile that happens in the same shell.
+    _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
+    _sdkroot="$(_xcrun --show-sdk-path)"
+    [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
     nimFlagsArray+=(
-      "--clang.exe=$(xcrun --sdk ${appleSdk} --find clang)"
-      "--clang.cpp.exe=$(xcrun --sdk ${appleSdk} --find clang++)"
-      "--clang.linkerexe=$(xcrun --sdk ${appleSdk} --find clang)"
-      "--clang.cpp.linkerexe=$(xcrun --sdk ${appleSdk} --find clang++)"
+      "--clang.exe=$(_xcrun --find clang)"
+      "--clang.cpp.exe=$(_xcrun --find clang++)"
+      "--clang.linkerexe=$(_xcrun --find clang)"
+      "--clang.cpp.linkerexe=$(_xcrun --find clang++)"
       "--passC:-target ${triple}"
-      "--passC:-isysroot $SDKROOT"
+      "--passC:-isysroot $_sdkroot"
       "--passL:-target ${triple}"
-      "--passL:-isysroot $SDKROOT"
+      "--passL:-isysroot $_sdkroot"
     )
   '';
 
