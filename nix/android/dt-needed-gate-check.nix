@@ -50,7 +50,13 @@ runCommand "logos-android-dt-needed-gate-check" { } ''
     || { echo "FAIL: --allow-dir did not admit the shipped directory"; cat allow.log; exit 1; }
   echo "PASS: --allow-dir admits a library packaged elsewhere"
 
-  # 4. an empty stub set would pass everything; refusing to gate at all is the
+  # 4. --allow is the same admission for ONE soname the container guarantees
+  #    but does not sit beside the artifact.
+  $gate --allow libvendor.so alone/libmodule.so > allow-soname.log 2>&1 \
+    || { echo "FAIL: --allow did not admit a named soname"; cat allow-soname.log; exit 1; }
+  echo "PASS: --allow admits a soname the container guarantees"
+
+  # 5. an empty stub set would pass everything; refusing to gate at all is the
   #    only honest answer.
   mkdir -p no-stubs
   if LOGOS_ANDROID_STUB_LIB_DIR=$PWD/no-stubs $gate shipped/libmodule.so > empty.log 2>&1; then

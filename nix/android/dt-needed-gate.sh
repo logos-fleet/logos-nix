@@ -13,13 +13,17 @@
 # whole libs/<abi> directory, factored out so a single artifact (a Bare module,
 # say) can be gated the moment it is produced rather than when it is packaged.
 #
-#   usage: logos-android-dt-needed-gate [--allow-dir <dir>]... <artifact.so>...
+#   usage: logos-android-dt-needed-gate [--allow-dir <dir>]... [--allow <soname>]...
+#                                       <artifact.so>...
 #   env:   LOGOS_ANDROID_READELF        llvm-readelf to read with   (required)
 #          LOGOS_ANDROID_STUB_LIB_DIR   the NDK stub library dir     (required)
 #          LOGOS_ANDROID_API_LEVEL      only used in the message     (optional)
 #
 # Every artifact's own directory is allowed implicitly: an app that ships a
-# module ships whatever sits beside it.
+# module ships whatever sits beside it. `--allow` names a single soname the
+# CONTAINER guarantees but that is not in either set -- libc++_shared.so is the
+# one that exists today, because Qt's Android platform refuses any other STL,
+# so every Logos APK packages it.
 #
 # Exit 0: every DT_NEEDED resolves on device. Exit 1: the foreign sonames are
 # named on stderr. Exit 2: usage error, or no usable allowlist to gate against.
@@ -30,12 +34,16 @@ STUB_DIR="${LOGOS_ANDROID_STUB_LIB_DIR:-}"
 API_LEVEL="${LOGOS_ANDROID_API_LEVEL:-unknown}"
 
 allow_dirs=()
+allow_sonames=()
 artifacts=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --allow-dir)
             [ $# -ge 2 ] || { echo "logos-android-dt-needed-gate: --allow-dir needs a directory" >&2; exit 2; }
             allow_dirs+=("$2"); shift 2 ;;
+        --allow)
+            [ $# -ge 2 ] || { echo "logos-android-dt-needed-gate: --allow needs a soname" >&2; exit 2; }
+            allow_sonames+=("$2"); shift 2 ;;
         --) shift; artifacts+=("$@"); break ;;
         -*) echo "logos-android-dt-needed-gate: unknown option: $1" >&2; exit 2 ;;
         *)  artifacts+=("$1"); shift ;;
@@ -73,6 +81,9 @@ for d in "${allow_dirs[@]}"; do
     [ -d "$d" ] || continue
     ls "$d"/*.so 2>/dev/null | xargs -n1 basename >> "$work/packaged.txt"
 done
+if [ ${#allow_sonames[@]} -gt 0 ]; then
+    printf '%s\n' "${allow_sonames[@]}" >> "$work/packaged.txt"
+fi
 sort -u "$work/packaged.txt" -o "$work/packaged.txt"
 sort -u "$work/packaged.txt" "$work/android.txt" > "$work/allowed.txt"
 
