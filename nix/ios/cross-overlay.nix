@@ -57,6 +57,15 @@ let
   # xcodeWrapper on PATH or exporting SDKROOT would also reach any BUILD-platform
   # compile happening in the same shell -- see logosRustCrossSetup for what that
   # costs.
+  #
+  # Two spellings of that, for two kinds of caller. `xcrunShim` is `xcrun` and
+  # only `xcrun`, on PATH, with DEVELOPER_DIR baked into the invocation -- for a
+  # build script that reaches for it by name (see logosRustCrossSetup).
+  xcrunShim = final.pkgsBuildBuild.writeShellScriptBin "xcrun" ''
+    exec env DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" /usr/bin/xcrun "$@"
+  '';
+
+  # `xcrunPreamble` is the shell-function form, for the setup snippets below.
   xcrunPreamble = ''
     _xcrun() { DEVELOPER_DIR="${final.xcodeWrapper.developerDir}" ${final.xcodeWrapper}/bin/xcrun --sdk ${appleSdk} "$@"; }
     _sdkroot="$(_xcrun --show-sdk-path)"
@@ -131,6 +140,27 @@ in
     _clang="$(_xcrun --find clang)"
     _clangxx="$(_xcrun --find clang++)"
 
+    # ONE BINARY ON PATH, and it is `xcrun` -- not the wrapper, and not
+    # DEVELOPER_DIR in the environment.
+    #
+    # A crate whose build script compiles bundled C (aws-lc-sys, ring,
+    # zstd-sys) goes through cc-rs, and cc-rs resolves the Apple SDK by running
+    # plain `xcrun --show-sdk-path --sdk iphoneos` ITSELF. It has never heard of
+    # CC_<target> or CFLAGS_<target>, so nothing below reaches it, and inside a
+    # nix build that xcrun exits 255 -- surfacing as "error occurred in cc-rs:
+    # command did not execute successfully" naming the build script and nothing
+    # else. (Measured on chat_module's aws-lc-sys v0.41.0 for aarch64-apple-ios.)
+    #
+    # Exporting DEVELOPER_DIR instead is the obvious fix and is WRONG, for the
+    # reason above: it is process-wide, and nixpkgs' own darwin cc wrapper
+    # resolves its sysroot through the same Xcode selection, so the BUILD half
+    # starts linking against the iPhone SDK -- measured as `quote`'s build
+    # script, "Undefined symbols for architecture arm64: __NSGetEnviron, _write,
+    # _pthread_*" on a plain `-lSystem -mmacosx-version-min=11.3.0` link line.
+    # The shim carries DEVELOPER_DIR to the one child that needs it and to no
+    # other, and shadows no compiler.
+    export PATH="${xcrunShim}/bin:$PATH"
+
     export CARGO_BUILD_TARGET=${rustTarget}
     # Both halves are needed: without the cc-rs one a build script compiles its
     # bundled C for the BUILDER and the link fails on undefined symbols --
@@ -138,12 +168,20 @@ in
     export CARGO_TARGET_${rustTargetVarUpper}_LINKER="$_clang"
     # rustc would normally read the SDK out of SDKROOT; it is not exported, so
     # the target link is told where it is directly.
-    export CARGO_TARGET_${rustTargetVarUpper}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=-target -Clink-arg=${triple}"
+    export CARGO_TARGET_${rustTargetVarUpper}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=--target=${triple}"
     export CC_${rustTargetVar}="$_clang"
     export CXX_${rustTargetVar}="$_clangxx"
     export AR_${rustTargetVar}="$(_xcrun --find ar)"
-    export CFLAGS_${rustTargetVar}="-target ${triple} -isysroot $_sdkroot"
-    export CXXFLAGS_${rustTargetVar}="-target ${triple} -isysroot $_sdkroot"
+    # `--target=<triple>`, ONE WORD, never `-target <triple>`. clang accepts
+    # both, but these flags do not stop at clang: cc-rs hands CFLAGS_<target>
+    # to whatever build system a -sys crate drives, and a bare `${triple}`
+    # sitting on its own is then read as a positional argument. openssl-src
+    # does exactly that -- its ./Configure takes the target name positionally,
+    # already has `ios64-cross`, and dies with "target already defined -
+    # ios64-cross (offending arg: arm64-apple-ios17)". A single word beginning
+    # with `-` passes through every such wrapper untouched.
+    export CFLAGS_${rustTargetVar}="--target=${triple} -isysroot $_sdkroot"
+    export CXXFLAGS_${rustTargetVar}="--target=${triple} -isysroot $_sdkroot"
   '';
 
   # ── cross-compiling a Nim project for this set ─────────────────────────
