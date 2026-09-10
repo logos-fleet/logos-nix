@@ -83,9 +83,74 @@ The pseudo-system is opt-in: `lib.forAllMobileTargets` iterates `lib.mobileTarge
 (`qt.toolchain.cmake` of the iOS qtbase, to pass as `CMAKE_TOOLCHAIN_FILE`).
 
 An app's own static-archive stage is `pkgs.mkIosCmakeStage { pname; version; src;
-sourceDir ? "."; cmakeFlags ? []; buildInputs ? []; }`: the same Xcode-clang setup
+sourceDir ? "."; cmakeFlags ? []; buildInputs ? []; exportedSymbols ? [];
+exportedSymbolFiles ? []; }`: the same Xcode-clang setup
 the Qt modules use (`nix/ios/xcode-clang.nix`), the toolchain file and cross flags
 applied, Qt on the path, and a post-install gate that fails on any dynamic image.
+
+**Symbols for dlopened modules.** The iOS Qt is built with
+`-DFEATURE_reduce_exports=OFF` (`nix/ios/qt-module.nix`, qtbase; the other three
+repos inherit it through `Qt6::Core`'s `QT_ENABLED_*_FEATURES`). With it on, a
+static Qt's whole API is `private external` in the archives and becomes local
+when an app links them, so an app image exports no Qt and a module dlopened into
+it cannot resolve a single symbol upward — the precondition ADR 0006 needs. The
+flag costs an app nothing on its own: which symbols an executable actually
+exports is decided at its link.
+
+That link is `logos_ios_export_symbols()`, in the CMake module at
+`pkgs.logosIosSymbolExports`:
+
+```cmake
+include(${LOGOS_IOS_CMAKE_DIR}/LogosIosSymbolExports.cmake)
+logos_ios_export_symbols(MyApp
+    SYMBOLS      _lp_protocol_version
+    SYMBOL_FILES ${LOGOS_IOS_EXPORTED_SYMBOLS_FILE})
+```
+
+It adds `-u <sym>` for each name (the archive member is otherwise never pulled
+in, since nothing in the app references what only a module calls) and an
+`-exported_symbols_list` of exactly that set. The list is the default and
+`EXPORT_ALL` is a noisy opt-out.
+
+**Call it, or pay for it.** With reduce_exports off, an iOS app that passes no
+list exports every default-visibility global it linked, and exports are
+dead-strip roots. Measured on the shell-preview, simulator, same Qt:
+
+| build | executable | exports | export trie |
+|---|---|---|---|
+| no list (what an app gets by default) | 51 656 824 B | 67 188 | 3 171 552 B |
+| dlopen spike, `EXPORT_ALL` | 51 733 272 B | 67 288 | 3 176 008 B |
+| dlopen spike, list of 27 | 45 831 256 B | 27 | 1 000 B |
+
+So the spike's own code is +76 KB and the list is worth 5.8 MB. Every iOS app
+image in this stack should call `logos_ios_export_symbols()`.
+
+`mkIosCmakeStage` passes `-DLOGOS_IOS_CMAKE_DIR` always, and
+`-DLOGOS_IOS_EXPORTED_SYMBOLS_FILE` when `exportedSymbols`/`exportedSymbolFiles`
+are non-empty (sorted and deduplicated into one store file). Both are repeated in
+`stage.passthru.logosIosSymbolExports.{cmakeDir,symbolsFile,cmakeFlags}`, because
+on iOS the app target is linked by Xcode outside nix and that impure half has to
+pass the same flags. The usual source of `exportedSymbolFiles` is the module set
+itself — each Bare module's `nm -u`, intersected with what the app defines. See
+`docs/research/spikes/ios-dlopen-bare-module.md` in logos-workspace.
+
+**One more thing Qt hides.** `reduce_exports` alone is not enough:
+`qmetatype.h` wraps the `QMetaTypeInterfaceWrapper<T>::metaType` definitions in
+an unconditional `#pragma GCC visibility push(hidden)` on non-Windows clang,
+while the same header declares them `extern template` for every builtin type --
+so a module never instantiates its own and references qtbase's, which the pragma
+made unexportable. Any module with a `QString` property hits it. The iOS qtbase
+therefore also rewrites that pragma to `push(default)` (`--replace-fail`, so a
+Qt bump that moves it fails the build). The alternative -- every module
+compiled with Qt's private `QT_NO_DATA_RELOCATION` so it instantiates its own
+hidden copy -- was measured to work as well, but puts a Qt-internal define in
+every module recipe and gives each module its own `QMetaTypeInterface` objects.
+
+Checks: `ios-overlay` (eval-only drift gate), `ios-symbol-exports` (links the same
+program with and without the helper and asserts the difference; no Qt, seconds),
+`ios-qt-exports-simulator` / `ios-qt-exports-device` (read the rebuilt Qt's Mach-O
+symbol tables, including a qtdeclarative symbol, so the inheritance is asserted
+and not assumed).
 
 **Purity boundary.** Everything iOS compiles with Xcode's clang and the
 iPhoneSimulator or iPhoneOS SDK from `/Applications/Xcode.app`, which cannot live in the

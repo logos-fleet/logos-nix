@@ -519,6 +519,18 @@
             i = mkIosPkgs { buildSystem = system; };
             d = mkIosPkgs { buildSystem = system; target = "aarch64-ios"; };
             iosQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" ];
+
+            # Two stages that differ only in whether they ask for an exported
+            # symbol set: everything about the helper is visible at eval.
+            probeArgs = {
+              pname = "logos-ios-stage-probe";
+              version = "0";
+              src = ./nix/ios;
+            };
+            probe = i.mkIosCmakeStage probeArgs;
+            probeExports = i.mkIosCmakeStage (
+              probeArgs // { exportedSymbols = [ "_lp_protocol_version" ]; }
+            );
             iosAssertions = [
               {
                 name = "device set targets the iphoneos SDK and differs from the simulator";
@@ -564,6 +576,36 @@
                 name = "qtdeclarative points at build-platform qsb";
                 ok = builtins.any (lib.hasSuffix "/lib/cmake/Qt6ShaderToolsTools") i.qt6.qtdeclarative.cmakeFlags;
               }
+              # A Bare module dlopened into the app resolves Qt upward, into the
+              # app image. With reduce_exports on, a static Qt is compiled
+              # -fvisibility=hidden and the app has no Qt in its export trie, so
+              # the module never loads. Both SDKs, or the device build silently
+              # differs from the simulator one it was validated on.
+              {
+                name = "both iOS Qt sets build qtbase with reduce_exports off";
+                ok = builtins.elem "-DFEATURE_reduce_exports=OFF" (i.qt6.qtbase.cmakeFlags or [ ])
+                  && builtins.elem "-DFEATURE_reduce_exports=OFF" (d.qt6.qtbase.cmakeFlags or [ ]);
+              }
+              # An app that exports Qt to its Bare modules needs the helper
+              # (`-exported_symbols_list` + `-u`) wherever it is configured —
+              # including the impure Xcode half, which only ever sees the
+              # stage's flags. Reaching it must not require naming a store path.
+              {
+                name = "the CMake module dir reaches a stage and its passthru";
+                ok = builtins.elem "-DLOGOS_IOS_CMAKE_DIR=${i.logosIosSymbolExports}" probe.cmakeFlags
+                  && probe.passthru.logosIosSymbolExports.cmakeDir == "${i.logosIosSymbolExports}";
+              }
+              # Exporting everything cost the spike +908 KB against +65 KB for a
+              # list, so a stage that asks for nothing must not silently opt in
+              # to a list either — and one that asks must get exactly its file.
+              {
+                name = "an exported-symbols list is opt-in, per stage";
+                ok = !(builtins.any (lib.hasPrefix "-DLOGOS_IOS_EXPORTED_SYMBOLS_FILE=") probe.cmakeFlags)
+                  && probe.passthru.logosIosSymbolExports.symbolsFile == null
+                  && builtins.elem
+                    "-DLOGOS_IOS_EXPORTED_SYMBOLS_FILE=${probeExports.passthru.logosIosSymbolExports.symbolsFile}"
+                    probeExports.cmakeFlags;
+              }
             ];
             iosGate = lib.foldl'
               (acc: a: acc && (lib.assertMsg a.ok "ios overlay drift: ${a.name}"))
@@ -573,6 +615,21 @@
           {
             ios-overlay = assert iosGate;
               pkgs.runCommand "ios-overlay-eval-gate" { } "touch $out";
+
+            # Qt for both SDKs, read back out of the Mach-O symbol tables.
+            ios-qt-exports-simulator = pkgs.callPackage ./nix/ios/qt-exports-check.nix {
+              label = "simulator";
+              inherit (i) xcodeWrapper;
+              inherit (i.qt6) qtbase qtdeclarative;
+            };
+            ios-qt-exports-device = pkgs.callPackage ./nix/ios/qt-exports-check.nix {
+              label = "device";
+              inherit (d) xcodeWrapper;
+              inherit (d.qt6) qtbase qtdeclarative;
+            };
+
+            # The app-side half. No Qt, so it stays a seconds-long check.
+            ios-symbol-exports = i.callPackage ./nix/ios/symbol-exports-check.nix { };
           }
         )
         // lib.optionalAttrs (builtins.elem system androidBuildSystems) (
