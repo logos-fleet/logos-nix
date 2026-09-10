@@ -100,16 +100,19 @@ in
   logosRustCrossSetup = lib.optionalString isCross ''
     # DEVELOPER_DIR first, and it is load-bearing. A cargo cross build runs in
     # the BUILD platform's stdenv so that the toolchain is runnable, and the
-    # Darwin cc-wrapper in that stdenv points DEVELOPER_DIR / SDKROOT at
-    # nixpkgs' macOS SDK -- which contains no iPhone SDK, so `xcrun --sdk
-    # iphoneos` answers "unable to find sdk" on stdout, `set -e` never fires
-    # (xcrun exits 0), and the failure surfaces much later as a compiler that
-    # cannot find anything. The version-gated wrapper's own DEVELOPER_DIR is
-    # the right one here; it is the same value its setup-hook exports, which
-    # the cc-wrapper then overwrites.
+    # Darwin cc-wrapper in that stdenv points DEVELOPER_DIR at nixpkgs' macOS
+    # SDK -- which contains no iPhone SDK, so `xcrun --sdk ${appleSdk}` answers
+    # "unable to find sdk" on STDOUT and exits 0. `set -e` never fires and the
+    # variable is set to an error message.
     export DEVELOPER_DIR="${final.xcodeWrapper.developerDir}"
-    export SDKROOT="$(xcrun --sdk ${appleSdk} --show-sdk-path)"
-    [ -d "$SDKROOT" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $SDKROOT" >&2; exit 1; }
+    _sdkroot="$(xcrun --sdk ${appleSdk} --show-sdk-path)"
+    [ -d "$_sdkroot" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $_sdkroot" >&2; exit 1; }
+    # SDKROOT is deliberately NOT exported. The same cargo run compiles this
+    # crate's build scripts and proc macros for the BUILD platform, and a
+    # process-wide SDKROOT pointing at the iPhone SDK makes those link against
+    # it -- measured: `quote`'s build script died on "symbol(s) not found for
+    # architecture arm64" while building for macOS. Everything below is keyed
+    # to the TARGET triple instead, so the host half is untouched.
     export CARGO_BUILD_TARGET=${rustTarget}
     _clang="$(xcrun --sdk ${appleSdk} --find clang)"
     _clangxx="$(xcrun --sdk ${appleSdk} --find clang++)"
@@ -119,11 +122,14 @@ in
     # for the BUILDER and the link fails on undefined symbols -- silently,
     # because the archive is still produced.
     export CARGO_TARGET_${builtins.replaceStrings [ "-" ] [ "_" ] (lib.toUpper rustTarget)}_LINKER="$_clang"
+    # rustc would normally read the SDK out of SDKROOT; it is not exported (see
+    # above), so the target link is told where it is directly.
+    export CARGO_TARGET_${builtins.replaceStrings [ "-" ] [ "_" ] (lib.toUpper rustTarget)}_RUSTFLAGS="-Clink-arg=-isysroot -Clink-arg=$_sdkroot -Clink-arg=-target -Clink-arg=${triple}"
     export CC_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$_clang"
     export CXX_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$_clangxx"
     export AR_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="$(xcrun --sdk ${appleSdk} --find ar)"
-    export CFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $SDKROOT"
-    export CXXFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $SDKROOT"
+    export CFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $_sdkroot"
+    export CXXFLAGS_${builtins.replaceStrings [ "-" ] [ "_" ] rustTarget}="-target ${triple} -isysroot $_sdkroot"
   '';
 
   # ── cross-compiling a Nim project for this set ─────────────────────────
