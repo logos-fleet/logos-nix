@@ -98,7 +98,18 @@ in
   # consumer writes one code path for both. Needs xcodeWrapper on PATH.
   logosRustCrossTarget = lib.optionalString isCross rustTarget;
   logosRustCrossSetup = lib.optionalString isCross ''
+    # DEVELOPER_DIR first, and it is load-bearing. A cargo cross build runs in
+    # the BUILD platform's stdenv so that the toolchain is runnable, and the
+    # Darwin cc-wrapper in that stdenv points DEVELOPER_DIR / SDKROOT at
+    # nixpkgs' macOS SDK -- which contains no iPhone SDK, so `xcrun --sdk
+    # iphoneos` answers "unable to find sdk" on stdout, `set -e` never fires
+    # (xcrun exits 0), and the failure surfaces much later as a compiler that
+    # cannot find anything. The version-gated wrapper's own DEVELOPER_DIR is
+    # the right one here; it is the same value its setup-hook exports, which
+    # the cc-wrapper then overwrites.
+    export DEVELOPER_DIR="${final.xcodeWrapper.developerDir}"
     export SDKROOT="$(xcrun --sdk ${appleSdk} --show-sdk-path)"
+    [ -d "$SDKROOT" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $SDKROOT" >&2; exit 1; }
     export CARGO_BUILD_TARGET=${rustTarget}
     _clang="$(xcrun --sdk ${appleSdk} --find clang)"
     _clangxx="$(xcrun --sdk ${appleSdk} --find clang++)"
@@ -124,7 +135,9 @@ in
     "--cc:clang"
   ];
   logosNimCrossSetup = lib.optionalString isCross ''
+    export DEVELOPER_DIR="${final.xcodeWrapper.developerDir}"
     export SDKROOT="$(xcrun --sdk ${appleSdk} --show-sdk-path)"
+    [ -d "$SDKROOT" ] || { echo "logos-nix: xcrun could not resolve the ${appleSdk} SDK: $SDKROOT" >&2; exit 1; }
     nimFlagsArray+=(
       "--clang.exe=$(xcrun --sdk ${appleSdk} --find clang)"
       "--clang.cpp.exe=$(xcrun --sdk ${appleSdk} --find clang++)"
