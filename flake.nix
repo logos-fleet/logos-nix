@@ -175,7 +175,14 @@
       # that wrap forAllTargets map build systems for Windows only, and
       # `stdenv.isDarwin` is true for an iOS host, so adding these keys to
       # forAllTargets would misroute them. Android adds its keys here.
-      mobileTargets = {
+      #
+      # androidBuildSystem is a parameter because, unlike the iOS sets (which
+      # only aarch64-darwin can build at all), the Android set builds from
+      # either member of androidBuildSystems -- and a derivation whose `system`
+      # is x86_64-linux cannot be realised on a Mac even when every one of its
+      # inputs can. A consumer verifying Android on a Mac passes
+      # "aarch64-darwin"; CI keeps the default.
+      iosTargets = {
         aarch64-ios-simulator = {
           buildSystem = "aarch64-darwin";
           pkgs = mkIosPkgs { target = "aarch64-ios-simulator"; };
@@ -184,13 +191,19 @@
           buildSystem = "aarch64-darwin";
           pkgs = mkIosPkgs { target = "aarch64-ios"; };
         };
-        aarch64-android = {
-          buildSystem = "x86_64-linux";
-          pkgs = mkAndroidPkgs { buildSystem = "x86_64-linux"; };
-        };
       };
-      forAllMobileTargets = f:
-        nixpkgs.lib.mapAttrs (system: t: f { inherit system; inherit (t) pkgs buildSystem; }) mobileTargets;
+      mkMobileTargets =
+        { androidBuildSystem ? "x86_64-linux" }:
+        iosTargets // {
+          aarch64-android = {
+            buildSystem = androidBuildSystem;
+            pkgs = mkAndroidPkgs { buildSystem = androidBuildSystem; };
+          };
+        };
+      mobileTargets = mkMobileTargets { };
+      mkForAllMobileTargets = targets: f:
+        nixpkgs.lib.mapAttrs (system: t: f { inherit system; inherit (t) pkgs buildSystem; }) targets;
+      forAllMobileTargets = mkForAllMobileTargets mobileTargets;
 
       # Native (Linux/macOS) package set on the workspace pin. Carries the
       # crates.io 403 fixes until the pin is bumped past NixOS/nixpkgs#512735
@@ -290,6 +303,8 @@
           androidApiLevel
           mobileTargets
           forAllMobileTargets
+          mkMobileTargets
+          mkForAllMobileTargets
           ;
 
         overlays = {
@@ -319,7 +334,23 @@
       # mkQtAndroidApk are under legacyPackages.<buildSystem>.pkgsIosSimulator
       # / .pkgsIos / .pkgsAndroid like pkgsWindows.
       packages = forAllMobileTargets ({ pkgs, ... }:
-        { inherit (pkgs.qt6) qtbase qtdeclarative qtshadertools qtsvg; }
+        {
+          inherit (pkgs.qt6)
+            qtbase
+            qtdeclarative
+            qtshadertools
+            qtsvg
+            qtremoteobjects
+            ;
+          # liblogos_core's non-Qt tail, so a consumer can build (and cache)
+          # it without naming the legacyPackages scope.
+          inherit (pkgs)
+            spdlog
+            boost
+            openssl
+            libsodium
+            ;
+        }
         // nixpkgs.lib.optionalAttrs (pkgs ? xcodeWrapper) { inherit (pkgs) xcodeWrapper; });
 
       # Drift guard for the Windows overlay.
@@ -518,7 +549,7 @@
           let
             i = mkIosPkgs { buildSystem = system; };
             d = mkIosPkgs { buildSystem = system; target = "aarch64-ios"; };
-            iosQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" ];
+            iosQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" "qtremoteobjects" ];
 
             # Two stages that differ only in whether they ask for an exported
             # symbol set: everything about the helper is visible at eval.
@@ -538,8 +569,26 @@
                   && d.qt6.qtbase.drvPath != i.qt6.qtbase.drvPath;
               }
               {
-                name = "all four Qt modules resolve";
+                name = "every Qt module Logos consumes resolves";
                 ok = builtins.all (m: builtins.isString i.qt6.${m}.drvPath) iosQtModules;
+              }
+              # liblogos_core's non-Qt tail. These are hand-rolled builds on
+              # Xcode's clang, so the failure to guard against is one of them
+              # silently falling back to the (broken) nixpkgs iOS stdenv or to
+              # a build-platform macOS archive: assert the iOS pname AND that
+              # the device set is a different derivation from the simulator's.
+              {
+                name = "the third-party tail is built for iOS, per SDK";
+                ok = builtins.all
+                  (p: i.${p}.pname == "${p}-ios" && d.${p}.drvPath != i.${p}.drvPath)
+                  [ "spdlog" "boost" "openssl" "libsodium" ];
+              }
+              # repc runs on the build platform; pointed at the target module
+              # it is not executable and the configure fails late, inside a
+              # long Qt build.
+              {
+                name = "qtremoteobjects points at build-platform repc";
+                ok = builtins.any (lib.hasSuffix "/lib/cmake/Qt6RemoteObjectsTools") i.qt6.qtremoteobjects.cmakeFlags;
               }
               # The version is the gate: a different declared Xcode must be a
               # different derivation, or a cache hit from the wrong Xcode
@@ -635,7 +684,7 @@
         // lib.optionalAttrs (builtins.elem system androidBuildSystems) (
           let
             a = mkAndroidPkgs { buildSystem = system; };
-            androidQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" ];
+            androidQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" "qtremoteobjects" ];
 
             androidInputNames =
               map (p: p.pname or p.name or "")
@@ -645,7 +694,7 @@
 
             androidAssertions = [
               {
-                name = "all four Qt modules resolve";
+                name = "every Qt module Logos consumes resolves";
                 ok = builtins.all (m: builtins.isString a.qt6.${m}.drvPath) androidQtModules;
               }
               # Qt aborts configure without the NDK's own toolchain file, and it

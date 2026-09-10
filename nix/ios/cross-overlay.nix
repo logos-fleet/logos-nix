@@ -10,16 +10,31 @@ let
 
   hostQt = final.pkgsBuildBuild.qt6;
 
+  # Read from `prev`, not `final`: this decides which attribute NAMES the
+  # overlay contributes, and in a nixpkgs overlay the set of names may not
+  # depend on `final` -- the fixpoint cannot be constructed at all. It also
+  # has to be right: overriding openssl on a NATIVE darwin set trips an
+  # assertion inside the stdenv bootstrap ("expected a set but found null",
+  # from isBuiltByBootstrapFilesCompiler on a cc-less stdenvNoCC).
+  contributesTail = !prev.stdenv.buildPlatform.canExecute prev.stdenv.hostPlatform;
+
   appleSdk = if hostPlatform.darwinPlatform == "ios-simulator" then "iphonesimulator" else "iphoneos";
   arch = hostPlatform.darwinArch;
 
-  # The four modules Logos consumes; order matters for the prefix-path lists.
+  # The Qt modules Logos consumes; order matters for the prefix-path lists.
   qtModules = [
     "qtbase"
     "qtdeclarative"
     "qtshadertools"
     "qtsvg"
+    "qtremoteobjects"
   ];
+
+  # The iOS SDK floor every hand-rolled third-party build below targets. Qt's
+  # own modules take theirs from macx-ios-clang; this number only has to be
+  # <= that one, or the archives will not link into the app.
+  iosDeploymentTarget = "17";
+
   prefixPath = scope: lib.concatStringsSep ";" (map (m: "${scope.${m}}") qtModules);
 in
 {
@@ -99,6 +114,18 @@ in
         qtDeps = [ qfinal.qtbase ];
       };
 
+      # What logos-protocol's qt_remote transport and liblogos_core link. repc
+      # is a host tool, the same trap as qsb above: point at the BUILD-platform
+      # Qt6RemoteObjectsTools or the configure fails with "Failed to find the
+      # host tool Qt6::repc. It is part of the Qt6RemoteObjectsTools package".
+      qtremoteobjects = mkQtModule {
+        pname = "qtremoteobjects";
+        qtDeps = [ qfinal.qtbase ];
+        cmakeFlags = [
+          "-DQt6RemoteObjectsTools_DIR=${hostQt.qtremoteobjects}/lib/cmake/Qt6RemoteObjectsTools"
+        ];
+      };
+
       qtdeclarative = mkQtModule {
         pname = "qtdeclarative";
         qtDeps = [
@@ -118,4 +145,34 @@ in
       };
     }
   );
+}
+
+// prev.lib.optionalAttrs contributesTail {
+  # liblogos_core's non-Qt dependency tail, static, on Xcode's clang
+  # (nix/ios/third-party.nix says why nixpkgs' own iOS stdenv is not used).
+  # Sources come from the cross scope, so they stay on this flake's nixpkgs
+  # pin; only the build is ours. Header-only packages are taken from the build
+  # platform unchanged -- their CMake config packages carry nothing
+  # platform-specific.
+  inherit
+    (import ./third-party.nix {
+      inherit lib appleSdk arch;
+      inherit (final) xcodeClang pkgsBuildBuild;
+      deploymentTarget = iosDeploymentTarget;
+      boostVersion = prev.boost.version;
+      opensslSrc = prev.openssl.src;
+      opensslVersion = prev.openssl.version;
+      spdlogSrc = prev.spdlog.src;
+      spdlogVersion = prev.spdlog.version;
+      libsodiumSrc = prev.libsodium.src;
+      libsodiumVersion = prev.libsodium.version;
+    })
+    spdlog
+    boost
+    openssl
+    libsodium
+    ;
+
+  nlohmann_json = final.pkgsBuildBuild.nlohmann_json;
+  cli11 = final.pkgsBuildBuild.cli11;
 }

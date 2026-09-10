@@ -136,6 +136,12 @@ stdenv.mkDerivation (finalAttrs: {
     # template reads every key.
     cat > android-build/gradle.properties <<EOF
     buildDir=build
+    # AGP packages each shipped .so by deflating it whole in memory, in
+    # parallel workers. An app with a large payload (Qt's 32 MB libicudata is
+    # the usual one) exceeds the default heap and gradle dies with
+    # OutOfMemoryError in zipflinger -- intermittently, since it depends on how
+    # many workers hold a buffer at once.
+    org.gradle.jvmargs=-Xmx4g
     qtAndroidDir=$qtPrefix/src/android/java
     qt5AndroidDir=$qtPrefix/src/android/java
     androidPackageName=${packageName}

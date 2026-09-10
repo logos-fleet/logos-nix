@@ -71,7 +71,8 @@ Qt 6.11.1 built from source as static frameworks for the iOS simulator and for
 iOS devices, on the same cross pin as Windows. Only aarch64-darwin with Xcode installed can build it.
 
 ```bash
-nix build .#packages.aarch64-ios-simulator.qtbase        # also qtdeclarative, qtshadertools, qtsvg
+nix build .#packages.aarch64-ios-simulator.qtbase        # also qtdeclarative, qtshadertools, qtsvg, qtremoteobjects
+nix build .#packages.aarch64-ios-simulator.boost         # liblogos_core's non-Qt tail: spdlog, boost, openssl, libsodium
 nix build .#packages.aarch64-ios.qtbase                  # device (iphoneos SDK)
 nix build .#legacyPackages.aarch64-darwin.pkgsIosSimulator.qt6.qtbase   # the full cross sets: pkgsIosSimulator, pkgsIos
 ```
@@ -89,8 +90,8 @@ the Qt modules use (`nix/ios/xcode-clang.nix`), the toolchain file and cross fla
 applied, Qt on the path, and a post-install gate that fails on any dynamic image.
 
 **Symbols for dlopened modules.** The iOS Qt is built with
-`-DFEATURE_reduce_exports=OFF` (`nix/ios/qt-module.nix`, qtbase; the other three
-repos inherit it through `Qt6::Core`'s `QT_ENABLED_*_FEATURES`). With it on, a
+`-DFEATURE_reduce_exports=OFF` (`nix/ios/qt-module.nix`, qtbase; the other
+modules inherit it through `Qt6::Core`'s `QT_ENABLED_*_FEATURES`). With it on, a
 static Qt's whole API is `private external` in the archives and becomes local
 when an app links them, so an app image exports no Qt and a module dlopened into
 it cannot resolve a single symbol upward — the precondition ADR 0006 needs. The
@@ -180,7 +181,8 @@ entirely inside a derivation. Builds from x86_64-linux under a strict sandbox
 and from aarch64-darwin.
 
 ```bash
-nix build .#packages.aarch64-android.qtbase          # also qtdeclarative, qtshadertools, qtsvg
+nix build .#packages.aarch64-android.qtbase          # also qtdeclarative, qtshadertools, qtsvg, qtremoteobjects
+nix build .#packages.aarch64-android.boost           # liblogos_core's non-Qt tail: spdlog, boost, openssl, libsodium
 nix build .#legacyPackages.x86_64-linux.pkgsAndroid.qt6.qtbase   # the full cross set
 nix build .#checks.x86_64-linux.android-apk          # smallest mkQtAndroidApk consumer
 ```
@@ -198,7 +200,10 @@ nix build --impure --expr \
 
 The pseudo-system is opt-in: `lib.forAllMobileTargets` iterates `lib.mobileTargets`
 (`aarch64-android`; iOS keys join the same list), while `lib.forAllTargets` stays
-native + Windows. A consumer gets `pkgs.logosQtCrossCmakeFlags`
+native + Windows. A consumer that has to realise Android derivations on a Mac
+builds its own list with `lib.mkMobileTargets { androidBuildSystem = "aarch64-darwin"; }`
+and iterates it with `lib.mkForAllMobileTargets`; the derivations are the same
+closure, keyed by the build platform that can run them. A consumer gets `pkgs.logosQtCrossCmakeFlags`
 (appendable `-D` flags, `[]` natively) and `pkgs.logosQtCrossToolchainFile` (the
 NDK's `android.toolchain.cmake`, to pass as `CMAKE_TOOLCHAIN_FILE`), plus
 `pkgs.androidPkgs` (the composed SDK/NDK), `pkgs.logosQtHost` (the

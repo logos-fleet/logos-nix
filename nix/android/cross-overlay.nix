@@ -344,8 +344,52 @@ lib.optionalAttrs isCross {
           "-DQt6ShaderToolsTools_DIR=${buildQt.qtshadertools}/lib/cmake/Qt6ShaderToolsTools"
         ])
       ) qprev.qtdeclarative;
+
+      # What logos-protocol's qt_remote transport and liblogos_core link. repc
+      # is a host tool, the same trap as the Qml/Quick tools above: without the
+      # BUILD-platform Qt6RemoteObjectsTools the configure fails with "Failed
+      # to find the host tool Qt6::repc".
+      qtremoteobjects = addCmakeFlags [
+        "-DQt6RemoteObjectsTools_DIR=${buildQt.qtremoteobjects}/lib/cmake/Qt6RemoteObjectsTools"
+      ] qprev.qtremoteobjects;
     }
   );
+
+  # ── liblogos_core's non-Qt tail ──────────────────────────────────────────
+  # spdlog's Android sink calls __android_log_write and nixpkgs links no -llog:
+  #   ld.lld: error: undefined symbol: __android_log_write
+  spdlog = prev.spdlog.overrideAttrs (old: {
+    env = (old.env or { }) // { NIX_LDFLAGS = "-llog"; };
+  });
+
+  # nixpkgs builds Boost with b2, whose <target-os>linux adds -lrt; the NDK has
+  # no librt and the link dies with "unable to find library -lrt". Boost's own
+  # CMake build of the same version (nix/boost-cmake.nix, shared with the iOS
+  # tail), static and PIC.
+  boost =
+    let
+      boostCmake = import ../boost-cmake.nix {
+        inherit (buildPkgs) fetchurl;
+        inherit (prev.boost) version;
+      };
+    in
+    prev.stdenv.mkDerivation {
+      pname = "boost";
+      inherit (prev.boost) version;
+      inherit (boostCmake) src postInstall;
+      nativeBuildInputs = [
+        buildPkgs.cmake
+        buildPkgs.ninja
+      ];
+      cmakeFlags = boostCmake.cmakeFlags ++ [
+        "-DBUILD_SHARED_LIBS=OFF"
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+      ];
+    };
+
+  # Header-only, and its CMake config carries nothing target-specific; the
+  # cross build of it needs a compiler it does not have.
+  cli11 = buildPkgs.cli11;
 }
 // {
   # CMAKE_TOOLCHAIN_FILE cannot be appended to an existing build tree's flags,
@@ -365,6 +409,8 @@ lib.optionalAttrs isCross {
             "qtdeclarative"
             "qtshadertools"
             "qtsvg"
+            # repc, for consumers of Qt6RemoteObjects (liblogos_core).
+            "qtremoteobjects"
           ]
         ))
       # Consumed by qt_add_executable/qt_finalize_target to decide which ABIs to
