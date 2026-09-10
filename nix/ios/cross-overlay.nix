@@ -80,6 +80,15 @@ in
     "-DCMAKE_OSX_SYSROOT=${appleSdk}"
     "-DCMAKE_OSX_ARCHITECTURES=${arch}"
     "-DCMAKE_OSX_DEPLOYMENT_TARGET=${iosDeploymentTarget}"
+    # CMAKE_SYSTEM_NAME=iOS makes CMake cross-compiling, and cross-compiling
+    # re-roots find_package/find_path/find_library into CMAKE_FIND_ROOT_PATH --
+    # even a `PATHS ... NO_DEFAULT_PATH` one. Store paths are not under the
+    # SDK, so a header-only dependency (nlohmann_json, an installed CMake
+    # config package) goes from present to invisible. The Android toolchain
+    # file sets the same three for the same reason.
+    "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH"
+    "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH"
+    "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH"
   ];
 
   # ── cross-compiling a Rust crate for this set ──────────────────────────
