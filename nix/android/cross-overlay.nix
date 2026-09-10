@@ -344,8 +344,58 @@ lib.optionalAttrs isCross {
           "-DQt6ShaderToolsTools_DIR=${buildQt.qtshadertools}/lib/cmake/Qt6ShaderToolsTools"
         ])
       ) qprev.qtdeclarative;
+
+      # What logos-protocol's qt_remote transport and liblogos_core link. repc
+      # is a host tool, the same trap as the Qml/Quick tools above: without the
+      # BUILD-platform Qt6RemoteObjectsTools the configure fails with "Failed
+      # to find the host tool Qt6::repc".
+      qtremoteobjects = addCmakeFlags (
+        lib.optionals isCross [
+          "-DQt6RemoteObjectsTools_DIR=${buildQt.qtremoteobjects}/lib/cmake/Qt6RemoteObjectsTools"
+        ]
+      ) qprev.qtremoteobjects;
     }
   );
+
+  # ── liblogos_core's non-Qt tail ──────────────────────────────────────────
+  # spdlog's Android sink calls __android_log_write and nixpkgs links no -llog:
+  #   ld.lld: error: undefined symbol: __android_log_write
+  spdlog = prev.spdlog.overrideAttrs (old: {
+    env = (old.env or { }) // { NIX_LDFLAGS = "-llog"; };
+  });
+
+  # nixpkgs builds Boost with b2, whose <target-os>linux adds -lrt; the NDK has
+  # no librt and the link dies with "unable to find library -lrt". Boost's own
+  # CMake build of the same version -- the same tarball the iOS tail uses --
+  # static and PIC, with only the libraries liblogos_core links.
+  boost = prev.stdenv.mkDerivation {
+    pname = "boost";
+    inherit (prev.boost) version;
+    src = buildPkgs.fetchurl {
+      url = "https://github.com/boostorg/boost/releases/download/boost-${prev.boost.version}/boost-${prev.boost.version}-cmake.tar.xz";
+      hash = "sha256-Z6zsAtDRGLXenrRB9ftwezoc3YhL4AyiS5pzyZVRH3Q=";
+    };
+    nativeBuildInputs = [
+      buildPkgs.cmake
+      buildPkgs.ninja
+    ];
+    cmakeFlags = [
+      "-DBOOST_INCLUDE_LIBRARIES=process;filesystem;system;asio;dll;uuid"
+      "-DBOOST_INSTALL_LAYOUT=system"
+      "-DBUILD_SHARED_LIBS=OFF"
+      "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
+      "-DBUILD_TESTING=OFF"
+      "-DBOOST_ENABLE_MPI=OFF"
+      "-DBOOST_ENABLE_PYTHON=OFF"
+    ];
+    # Boost.DLL is header-only and Boost's CMake installs nothing for it even
+    # when it is listed; logos-module-loader-qt includes it.
+    postInstall = "cp -r ../libs/dll/include/boost/. $out/include/boost/";
+  };
+
+  # Header-only, and its CMake config carries nothing target-specific; the
+  # cross build of it needs a compiler it does not have.
+  cli11 = buildPkgs.cli11;
 }
 // {
   # CMAKE_TOOLCHAIN_FILE cannot be appended to an existing build tree's flags,
@@ -365,6 +415,8 @@ lib.optionalAttrs isCross {
             "qtdeclarative"
             "qtshadertools"
             "qtsvg"
+            # repc, for consumers of Qt6RemoteObjects (liblogos_core).
+            "qtremoteobjects"
           ]
         ))
       # Consumed by qt_add_executable/qt_finalize_target to decide which ABIs to
