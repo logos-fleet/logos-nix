@@ -182,16 +182,19 @@
       # is x86_64-linux cannot be realised on a Mac even when every one of its
       # inputs can. A consumer verifying Android on a Mac passes
       # "aarch64-darwin"; CI keeps the default.
+      iosTargets = {
+        aarch64-ios-simulator = {
+          buildSystem = "aarch64-darwin";
+          pkgs = mkIosPkgs { target = "aarch64-ios-simulator"; };
+        };
+        aarch64-ios = {
+          buildSystem = "aarch64-darwin";
+          pkgs = mkIosPkgs { target = "aarch64-ios"; };
+        };
+      };
       mkMobileTargets =
-        { androidBuildSystem ? "x86_64-linux" }: {
-          aarch64-ios-simulator = {
-            buildSystem = "aarch64-darwin";
-            pkgs = mkIosPkgs { target = "aarch64-ios-simulator"; };
-          };
-          aarch64-ios = {
-            buildSystem = "aarch64-darwin";
-            pkgs = mkIosPkgs { target = "aarch64-ios"; };
-          };
+        { androidBuildSystem ? "x86_64-linux" }:
+        iosTargets // {
           aarch64-android = {
             buildSystem = androidBuildSystem;
             pkgs = mkAndroidPkgs { buildSystem = androidBuildSystem; };
@@ -681,7 +684,7 @@
         // lib.optionalAttrs (builtins.elem system androidBuildSystems) (
           let
             a = mkAndroidPkgs { buildSystem = system; };
-            androidQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" ];
+            androidQtModules = [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" "qtremoteobjects" ];
 
             androidInputNames =
               map (p: p.pname or p.name or "")
@@ -691,7 +694,7 @@
 
             androidAssertions = [
               {
-                name = "all four Qt modules resolve";
+                name = "every Qt module Logos consumes resolves";
                 ok = builtins.all (m: builtins.isString a.qt6.${m}.drvPath) androidQtModules;
               }
               # Qt aborts configure without the NDK's own toolchain file, and it

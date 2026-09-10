@@ -3,10 +3,6 @@
 # usable here: at this pin `pkgsIosSimulator.stdenv` fails building
 # compiler-rt ("ln: failed to create symbolic link './lib': File exists")
 # and targets the macOS SDK, so every archive below is built by hand.
-#
-# Header-only libraries (nlohmann_json, cli11, cpp-semver) are taken from
-# the build platform's package set unchanged: their CMake config packages
-# carry no platform-specific content.
 {
   lib,
   xcodeClang,
@@ -25,6 +21,11 @@
 }:
 
 let
+  boostCmake = import ../boost-cmake.nix {
+    inherit (pkgsBuildBuild) fetchurl;
+    version = boostVersion;
+  };
+
   # Target triple clang wants for this SDK.
   triple = "${arch}-apple-ios${deploymentTarget}" + lib.optionalString (appleSdk == "iphonesimulator") "-simulator";
 
@@ -37,7 +38,7 @@ let
     "-DBUILD_SHARED_LIBS=OFF"
   ];
 
-  # For autotools/Configure builds: a compiler command line that already
+  # For libsodium's autotools build: a compiler command line that already
   # carries the SDK and triple.
   ccEnv = ''
     export SDKROOT=$(xcrun --sdk ${appleSdk} --show-sdk-path)
@@ -61,19 +62,12 @@ in
     ];
   };
 
-  # Boost through its own CMake build. The boost.io release tarball nixpkgs
-  # pins carries no CMakeLists.txt (checked: 1.89.0 fails "does not appear to
-  # contain CMakeLists.txt"), so the GitHub "-cmake" archive of the same
-  # version is fetched instead. Only what liblogos_core and logos-protocol
-  # link: process and filesystem, plus asio/system headers; their
-  # dependencies are pulled in by Boost's CMake automatically.
+  # Boost through its own CMake build (../boost-cmake.nix, shared with the
+  # Android tail), static.
   boost = xcodeClang.mkDerivation {
     pname = "boost-ios";
     version = boostVersion;
-    src = pkgsBuildBuild.fetchurl {
-      url = "https://github.com/boostorg/boost/releases/download/boost-${boostVersion}/boost-${boostVersion}-cmake.tar.xz";
-      hash = "sha256-Z6zsAtDRGLXenrRB9ftwezoc3YhL4AyiS5pzyZVRH3Q=";
-    };
+    inherit (boostCmake) src postInstall;
     # Boost.Process v2's shell parser is wordexp(3), which the iOS SDK marks
     # unavailable ("'wordexp' is unavailable: not available on iOS"); take
     # the ENOTSUP branch it already has for OpenBSD/Android. iOS-only set, so
@@ -83,20 +77,9 @@ in
         --replace-fail '!defined(__OpenBSD__) && !defined(__ANDROID__)' \
                        '!defined(__OpenBSD__) && !defined(__ANDROID__) && !defined(__APPLE__)'
     '';
-    cmakeFlags = cmakeTargetFlags ++ [
-      "-DBOOST_INCLUDE_LIBRARIES=process;filesystem;system;asio;dll;uuid"
-      "-DBOOST_INSTALL_LAYOUT=system"
-      "-DBUILD_TESTING=OFF"
-      "-DBOOST_ENABLE_MPI=OFF"
-      "-DBOOST_ENABLE_PYTHON=OFF"
+    cmakeFlags = cmakeTargetFlags ++ boostCmake.cmakeFlags ++ [
       "-DBOOST_RUNTIME_LINK=static"
     ];
-    # Boost.DLL is header-only and its CMakeLists installs nothing even when
-    # listed (checked: "libraries included: ...;dll" and no boost/dll/ in
-    # the prefix); logos-module-loader-qt includes it, so copy the tree.
-    postInstall = ''
-      cp -r ../libs/dll/include/boost/. $out/include/boost/
-    '';
   };
 
   # OpenSSL's own Configure knows the iOS SDKs; it shells out to xcrun, which
