@@ -345,7 +345,7 @@ here:
 | `packages.<system>.qt-wasm-qtbase` … `-qtdeclarative`, `-qtshadertools`, `-qtsvg`, `-qtremoteobjects` | The modules on their own |
 | `packages.<system>.qt-wasm-qml-probe` | A Qt Quick + Controls + Svg + QtRO image, linked and **weighed** (raw and brotli, against ADR 0004's budget) |
 | `checks.x86_64-linux.qt-wasm-qml-probe` | The same probe, in `nix flake check` — Linux-only, like `android-apk`, because it builds Qt from source |
-| `lib.qtWasmFor <system>` | The module set plus `cmakeFlags`, for a consumer that wants the pieces |
+| `lib.qtWasmFor <system>` | `{ modules, prefix, version, cmakeFlags }`, for a consumer that wants the pieces |
 
 ```nix
 # A wasm app against this Qt: one toolchain file, one prefix.

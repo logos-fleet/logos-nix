@@ -411,10 +411,9 @@
               inherit qtWasm;
             };
           }
-          // nixpkgs.lib.mapAttrs' (n: nixpkgs.lib.nameValuePair "qt-wasm-${n}")
-            (nixpkgs.lib.genAttrs
-              [ "qtbase" "qtdeclarative" "qtshadertools" "qtsvg" "qtremoteobjects" ]
-              (m: qtWasm.${m})));
+          // nixpkgs.lib.mapAttrs'
+            (n: nixpkgs.lib.nameValuePair "qt-wasm-${n}")
+            qtWasm.modules);
 
       # Drift guard for the Windows overlay.
       #
@@ -570,21 +569,19 @@
           qt-wasm-shape =
             let
               qtWasm = qtWasmFor system;
-              flagsOf = m: qtWasm.${m}.wasmCmakeFlags;
+              flagsOf = m: qtWasm.modules.${m}.wasmCmakeFlags;
               hasFlag = m: f: builtins.elem f (flagsOf m);
+              # unsafeDiscardStringContext: these become the needle of a
+              # `hasInfix`, which is a regex match, and a regex string is not
+              # allowed to carry a store-path reference.
+              wasmPaths = map (d: builtins.unsafeDiscardStringContext (toString d))
+                (lib.attrValues qtWasm.modules);
               # A *Tools_DIR flag must name a BUILD-platform Qt. The wasm
               # modules' own store paths are the wrong answer, and the only
               # wrong answer that still configures.
               hostToolFlag = m: suffix:
                 let
-                    matches = builtins.filter (lib.hasInfix "/lib/cmake/${suffix}") (flagsOf m);
-                  # unsafeDiscardStringContext: these become the needle of a
-                  # `hasInfix`, which is a regex match, and a regex string is
-                  # not allowed to carry a store-path reference.
-                  wasmPaths = map (d: builtins.unsafeDiscardStringContext (toString d))
-                    (lib.attrValues (removeAttrs qtWasm [
-                      "prefix" "version" "cmakeFlags"
-                    ]));
+                  matches = builtins.filter (lib.hasInfix "/lib/cmake/${suffix}") (flagsOf m);
                 in
                 matches != [ ]
                 && builtins.all (f: !(builtins.any (p: lib.hasInfix p f) wasmPaths)) matches;
@@ -624,7 +621,7 @@
                   name = "the modules chainload the wasm qtbase toolchain";
                   ok = builtins.all
                     (m: builtins.any
-                      (lib.hasPrefix "-DCMAKE_TOOLCHAIN_FILE=${qtWasm.qtbase}")
+                      (lib.hasPrefix "-DCMAKE_TOOLCHAIN_FILE=${qtWasm.modules.qtbase}")
                       (flagsOf m))
                     [ "qtdeclarative" "qtshadertools" "qtsvg" "qtremoteobjects" ];
                 }

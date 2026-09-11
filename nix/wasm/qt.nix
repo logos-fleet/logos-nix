@@ -269,15 +269,11 @@ let
       ;
   };
 
-  # The BUILD-platform Qt prefixes a consumer's code generators come out of.
+  # The BUILD-platform Qt prefixes a consumer's code generators come out of:
+  # the host twin of every module built above, derived from `modules` so that
+  # adding a module does not leave a second list to remember.
   hostPrefixPath = lib.concatStringsSep ";" (
-    map (m: "${hostQt.${m}}") [
-      "qtbase"
-      "qtdeclarative"
-      "qtshadertools"
-      "qtsvg"
-      "qtremoteobjects"
-    ]
+    map (m: "${hostQt.${m}}") (builtins.attrNames modules)
   );
 
   # ONE PREFIX for consumers. A wasm Qt is five store paths, and a consumer
@@ -293,9 +289,11 @@ let
     };
   };
 in
-modules
-// {
-  inherit prefix version;
+{
+  # `modules` as one attribute rather than five top-level ones: everything that
+  # iterates the module set (the flake's `qt-wasm-<module>` packages, the
+  # qt-wasm-shape gate) then has nothing to filter the metadata back out of.
+  inherit modules prefix version;
 
   # What a consumer puts on its cmake line to build a wasm app against this Qt.
   # qt.toolchain.cmake rather than Emscripten.cmake: it chainloads the latter

@@ -1,6 +1,8 @@
-// Prints one line and instantiates the QML scene. The line is what the size
-// check greps for: an image that links but cannot run its own QML is not proof
-// that the Qt build is usable.
+// The link's reason to pull in the whole runtime: a QML engine loading a
+// document, plus a QtRO node. Nothing here runs during the build — a Qt-wasm
+// image needs a canvas — so what the probe proves is that this translation unit
+// LINKS against the wasm Qt next door, and what the resulting image WEIGHS
+// (../qml-probe.nix).
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QRemoteObjectNode>
