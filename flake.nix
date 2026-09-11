@@ -225,10 +225,17 @@
       fetchCargoVendorUserAgentOverlay = import ./nix/overlays/fetch-cargo-vendor-user-agent.nix;
       importCargoLockStaticCratesIoOverlay = import ./nix/overlays/import-cargo-lock-static-crates-io.nix;
       fetchCrateStaticCratesIoOverlay = import ./nix/overlays/fetch-crate-static-crates-io.nix;
+
+      # THE EMSCRIPTEN PIN. Attribute-only (logosEmscripten,
+      # logosEmscriptenVersion, logosEmscriptenSetup, logosWasmCmake*), so it
+      # rides along on every native package set without changing one hash. See
+      # nix/wasm/overlay.nix.
+      emscriptenOverlay = import ./nix/wasm/overlay.nix;
       nativeOverlays = [
         fetchCargoVendorUserAgentOverlay
         importCargoLockStaticCratesIoOverlay
         fetchCrateStaticCratesIoOverlay
+        emscriptenOverlay
       ];
       mkNativePkgs = system: import nixpkgs { inherit system; overlays = nativeOverlays; };
 
@@ -327,6 +334,7 @@
           fetchCargoVendorUserAgent = fetchCargoVendorUserAgentOverlay;
           importCargoLockStaticCratesIo = importCargoLockStaticCratesIoOverlay;
           fetchCrateStaticCratesIo = fetchCrateStaticCratesIoOverlay;
+          emscripten = emscriptenOverlay;
         };
       };
 
@@ -502,6 +510,45 @@
                 + " entries but lib.overlays lists " + toString (builtins.length nativeNames)
                 + " non-cross overlays (" + toString nativeNames + ")");
             pkgs.runCommand "overlay-exports-eval-gate" { } "touch $out";
+
+          # THE EMSCRIPTEN PIN, proven by using it.
+          #
+          # An eval-only assertion would not be worth writing here: what a
+          # consumer needs from this overlay is not "an attribute exists", it is
+          # "emcc runs in a nix build, finds a WRITABLE cache, and emits wasm".
+          # Each of those three fails differently and only the last one is
+          # visible in the output, so the check compiles a real translation unit
+          # and reads the magic bytes off the result.
+          #
+          # C++ rather than C on purpose: libc++ is what needs a cache build in
+          # a configuration the store copy does not ship, which is the whole
+          # reason logosEmscriptenSetup exists.
+          emscripten-pin =
+            assert lib.assertMsg
+              (pkgs.logosEmscripten.version == pkgs.logosEmscriptenVersion)
+              "emscripten overlay drift: logosEmscriptenVersion does not match the package";
+            assert lib.assertMsg
+              (builtins.pathExists pkgs.logosWasmCmakeToolchain)
+              ("emscripten overlay drift: no cmake toolchain file at "
+                + pkgs.logosWasmCmakeToolchain);
+            pkgs.runCommand "emscripten-pin-check" { } ''
+              ${pkgs.logosEmscriptenSetup}
+              cat > probe.cpp <<'EOF'
+              #include <string>
+              #include <vector>
+              extern "C" int probe(int a, int b) {
+                  std::vector<std::string> v{std::to_string(a), std::to_string(b)};
+                  return static_cast<int>(v[0].size() + v[1].size()) + a + b;
+              }
+              EOF
+              emcc -std=c++17 -O2 -c probe.cpp -o probe.o
+              # \0asm — the four bytes that separate a wasm object from the
+              # native one an unconfigured emcc wrapper would have produced.
+              head -c 4 probe.o | od -An -c | grep -q '\\0   a   s   m' \
+                || { echo "probe.o is not a wasm object"; head -c 16 probe.o | od -An -c; exit 1; }
+              echo "emscripten ${pkgs.logosEmscriptenVersion}: wasm object OK"
+              touch $out
+            '';
 
           import-cargo-lock-overlay =
             let

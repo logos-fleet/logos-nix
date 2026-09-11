@@ -17,6 +17,7 @@ Previously, [`logos-cpp-sdk`](https://github.com/logos-co/logos-cpp-sdk) served 
 | `lib.overlays.fetchCargoVendorUserAgent` | Makes `rustPlatform.fetchCargoVendor` send a User-Agent on the current pin (crates.io 403s python-requests' default). Applied by `forAllSystems`/`forAllTargets`/`legacyPackages`; a consumer that does its own `import nixpkgs` should apply `lib.nativeOverlays` rather than naming this one. See `nix/overlays/fetch-cargo-vendor-user-agent.nix`. |
 | `lib.overlays.importCargoLockStaticCratesIo` | Points `rustPlatform.importCargoLock` at `static.crates.io` on the current pin (crates.io's `/api/v1/crates` 403s the `curl/...` User-Agent `fetchurl` sends). This is the fetcher a `cargoLock` build uses; `cargoHash` builds use `fetchCargoVendor` above, so a repo that builds Rust needs whichever matches its packages, or both. Applied by `forAllSystems`/`forAllTargets`/`legacyPackages`; a consumer that does its own `import nixpkgs` should apply `lib.nativeOverlays` rather than naming this one. See `nix/overlays/import-cargo-lock-static-crates-io.nix`. |
 | `lib.overlays.fetchCrateStaticCratesIo` | Points `fetchCrate` at `static.crates.io` on the current pin — the third fetcher, and the one that pulls a crate's own *source* tarball rather than a vendored dependency. Reached from a module closure via qtdeclarative → qtsvg → jasper → libheif (`rav1e`, `cargo-c`). Swaps `fetchCrate`'s own `registryDl` default, so a caller naming a registry still wins. See `nix/overlays/fetch-crate-static-crates-io.nix`. |
+| `lib.overlays.emscripten` | The **Emscripten pin** — `pkgs.logosEmscripten`, `pkgs.logosEmscriptenVersion`, `pkgs.logosEmscriptenSetup` (a shell snippet that puts `emcc` on `PATH` with a *writable* cache seeded from the store copy) and `pkgs.logosWasmCmakeToolchain` / `pkgs.logosWasmCmakeFlags`. One emsdk for every Logos wasm32 artifact, because a wasm host links C++ and Rust images that must share an ABI. Attribute-only, so it changes no other derivation's hash. Applied by `lib.nativeOverlays`. See [Wasm target](#wasm-target-wasm32-emscripten) and `nix/wasm/overlay.nix`. |
 
 ## Usage
 
@@ -292,3 +293,34 @@ dependencies and the SDK already in the store): the four Qt modules build in
 **5m28s**; their combined closure is **4.6 GiB**, of which **4.2 GiB** is the
 androidenv SDK + NDK. An APK derivation takes about a minute on top; a
 one-window app is 19 MiB.
+
+## Wasm target (`wasm32-emscripten`)
+
+There is no `packages.wasm32-emscripten.*` pseudo-system here, and that is
+deliberate: unlike iOS and Android, a wasm artifact is not produced by a nixpkgs
+*cross package set*. Emscripten brings its own sysroot, its own libc and its own
+libc++, and nixpkgs' `pkgsCross.wasi32` is a different (WASI, not Emscripten)
+target that cannot link the JS glue a browser host needs. So what this repo pins
+is the **toolchain**, and each consumer drives `emcc` itself from an ordinary
+native derivation.
+
+```nix
+pkgs.stdenv.mkDerivation {
+  # ...
+  preConfigure = pkgs.logosEmscriptenSetup;   # emcc on PATH, writable EM_CACHE
+  cmakeFlags = pkgs.logosWasmCmakeFlags;      # -DCMAKE_TOOLCHAIN_FILE=...
+}
+```
+
+`pkgs.logosEmscriptenSetup` copies the 84 MB store cache into `$TMPDIR` and makes
+it writable. Skipping it is the failure everybody hits once: a `-O2` link wants a
+build of libc++ that the store copy does not ship (nixpkgs ships the `-debug`
+variants), emcc goes to build it, and the store is read-only.
+
+`pkgs.logosEmscriptenVersion` is the pin as data, for a backend that installs its
+own toolchain — a Rust core reaching wasm through `wasm32-unknown-emscripten` has
+to use *this* emsdk or its libc++ will not match the C++ half of the same image.
+
+`checks.<system>.emscripten-pin` compiles a C++ translation unit and reads the
+`\0asm` magic off the object, so the pin is proven by use rather than by an
+attribute existing.
