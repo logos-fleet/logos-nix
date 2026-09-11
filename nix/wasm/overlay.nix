@@ -32,6 +32,35 @@ in
   # targets, an emsdk checkout) matches on this rather than on a store path.
   logosEmscriptenVersion = emscripten.version;
 
+  # AN EMSDK-SHAPED VIEW of the pinned emscripten.
+  #
+  # Qt's wasm support discovers its toolchain through `$EMSDK` and nothing else:
+  # `qt_auto_detect_wasm()` is a FATAL_ERROR when the variable is unset, and
+  # `__qt_internal_get_emroot_path_suffix_from_emsdk_env()` then reads
+  # `$EMSDK/.emscripten`, regex-matches the QUOTED half of its EMSCRIPTEN_ROOT
+  # line and treats the result as a path RELATIVE to $EMSDK. An emsdk checkout
+  # writes `EMSCRIPTEN_ROOT = emsdk_path + '/upstream/emscripten'`, so what Qt
+  # wants back is the literal `/upstream/emscripten` — nixpkgs' own
+  # `.emscripten` has an ABSOLUTE store path there and would hand Qt
+  # `$EMSDK//nix/store/...`.
+  #
+  # Hence a directory, in the store, with the two things an emsdk has: the
+  # `upstream/emscripten` subtree and a `.emscripten` whose root line is
+  # relative. Nothing copies; it is symlinks and three lines of python.
+  #
+  # In the store rather than in $TMPDIR because Qt BAKES the toolchain file path
+  # it finds this way into the installed `qt.toolchain.cmake`, which every
+  # consumer of a wasm Qt then chainloads.
+  logosEmsdk = prev.runCommand "logos-emsdk-${emscripten.version}" { } ''
+    mkdir -p $out/upstream
+    ln -s ${emscripten}/share/emscripten $out/upstream/emscripten
+    {
+      echo "import os"
+      echo "emsdk_path = os.path.dirname(os.path.abspath(__file__))"
+      echo "EMSCRIPTEN_ROOT = emsdk_path + '/upstream/emscripten'"
+    } > $out/.emscripten
+  '';
+
   # Put emcc on PATH with a WRITABLE cache seeded from the store one.
   #
   # Run it in preConfigure (cmake probes the compiler) or at the top of a hand-
@@ -43,6 +72,10 @@ in
   # LLVM_ROOT / BINARYEN_ROOT already point into the store. Only the cache moves.
   logosEmscriptenSetup = ''
     export EM_CONFIG=${emscripten}/share/emscripten/.emscripten
+    # Qt (and only Qt) asks for the emsdk by layout rather than by compiler;
+    # see logosEmsdk. Harmless for every other consumer — emcc itself reads
+    # EM_CONFIG, never EMSDK.
+    export EMSDK=${final.logosEmsdk}
     export EM_CACHE="$TMPDIR/logos-em-cache"
     if [ ! -d "$EM_CACHE" ]; then
       cp -R ${emscripten}/share/emscripten/cache "$EM_CACHE"

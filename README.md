@@ -17,6 +17,7 @@ Previously, [`logos-cpp-sdk`](https://github.com/logos-co/logos-cpp-sdk) served 
 | `lib.overlays.fetchCargoVendorUserAgent` | Makes `rustPlatform.fetchCargoVendor` send a User-Agent on the current pin (crates.io 403s python-requests' default). Applied by `forAllSystems`/`forAllTargets`/`legacyPackages`; a consumer that does its own `import nixpkgs` should apply `lib.nativeOverlays` rather than naming this one. See `nix/overlays/fetch-cargo-vendor-user-agent.nix`. |
 | `lib.overlays.importCargoLockStaticCratesIo` | Points `rustPlatform.importCargoLock` at `static.crates.io` on the current pin (crates.io's `/api/v1/crates` 403s the `curl/...` User-Agent `fetchurl` sends). This is the fetcher a `cargoLock` build uses; `cargoHash` builds use `fetchCargoVendor` above, so a repo that builds Rust needs whichever matches its packages, or both. Applied by `forAllSystems`/`forAllTargets`/`legacyPackages`; a consumer that does its own `import nixpkgs` should apply `lib.nativeOverlays` rather than naming this one. See `nix/overlays/import-cargo-lock-static-crates-io.nix`. |
 | `lib.overlays.fetchCrateStaticCratesIo` | Points `fetchCrate` at `static.crates.io` on the current pin — the third fetcher, and the one that pulls a crate's own *source* tarball rather than a vendored dependency. Reached from a module closure via qtdeclarative → qtsvg → jasper → libheif (`rav1e`, `cargo-c`). Swaps `fetchCrate`'s own `registryDl` default, so a caller naming a registry still wins. See `nix/overlays/fetch-crate-static-crates-io.nix`. |
+| `packages.<system>.qt-wasm` | **Qt 6.11.1 for WebAssembly**, single-threaded and static, built from source: the QML runtime the Web container serves. With `qt-wasm-qml-probe`, which links a Qt Quick image against it and weighs it. See [Qt for WebAssembly](#qt-for-webassembly-packagessystemqt-wasm). |
 | `lib.overlays.emscripten` | The **Emscripten pin** — `pkgs.logosEmscripten`, `pkgs.logosEmscriptenVersion`, `pkgs.logosEmscriptenSetup` (a shell snippet that puts `emcc` on `PATH` with a *writable* cache seeded from the store copy) and `pkgs.logosWasmCmakeToolchain` / `pkgs.logosWasmCmakeFlags`. One emsdk for every Logos wasm32 artifact, because a wasm host links C++ and Rust images that must share an ABI. Attribute-only, so it changes no other derivation's hash. Applied by `lib.nativeOverlays`. See [Wasm target](#wasm-target-wasm32-emscripten) and `nix/wasm/overlay.nix`. |
 
 ## Usage
@@ -324,3 +325,48 @@ to use *this* emsdk or its libc++ will not match the C++ half of the same image.
 `checks.<system>.emscripten-pin` compiles a C++ translation unit and reads the
 `\0asm` magic off the object, so the pin is proven by use rather than by an
 attribute existing.
+
+`pkgs.logosEmsdk` is the same emscripten in the **layout an emsdk checkout has**
+(`upstream/emscripten` plus a `.emscripten` whose `EMSCRIPTEN_ROOT` is relative),
+and `logosEmscriptenSetup` exports `EMSDK` pointing at it. Only Qt needs this:
+`qt_auto_detect_wasm()` is a `FATAL_ERROR` when `EMSDK` is unset and then reads
+the root suffix out of `$EMSDK/.emscripten`, where nixpkgs' own copy has an
+absolute store path. emcc itself never looks at `EMSDK`.
+
+### Qt for WebAssembly (`packages.<system>.qt-wasm`)
+
+The QML runtime the Web container serves (ADR 0004 in logos-workspace) is Qt
+**6.11.1 for wasm32-emscripten, single-threaded, static**, built from source
+here:
+
+| Output | What it is |
+|---|---|
+| `packages.<system>.qt-wasm` | One prefix with all five modules, for `CMAKE_PREFIX_PATH` / `CMAKE_FIND_ROOT_PATH` |
+| `packages.<system>.qt-wasm-qtbase` … `-qtdeclarative`, `-qtshadertools`, `-qtsvg`, `-qtremoteobjects` | The modules on their own |
+| `packages.<system>.qt-wasm-qml-probe` | A Qt Quick + Controls + Svg + QtRO image, linked and **weighed** (raw and brotli, against ADR 0004's budget) |
+| `checks.x86_64-linux.qt-wasm-qml-probe` | The same probe, in `nix flake check` — Linux-only, like `android-apk`, because it builds Qt from source |
+| `lib.qtWasmFor <system>` | `{ modules, prefix, version, cmakeFlags }`, for a consumer that wants the pieces |
+
+```nix
+# A wasm app against this Qt: one toolchain file, one prefix.
+pkgs.stdenv.mkDerivation {
+  buildPhase = ''
+    ${pkgs.logosEmscriptenSetup}
+    cmake -S . -B build -GNinja ${lib.escapeShellArgs qtWasm.cmakeFlags}
+    cmake --build build
+  '';
+}
+```
+
+Two pins meet in this build and they are deliberately different ones: the
+**emsdk** is the native pin's (above), because the runtime's image sits next to
+logos-protocol's wasm transport and a module core compiled by the same emsdk;
+the **Qt** is `nixpkgs-windows`' 6.11.1, the version iOS, Android and Windows
+already use and the one ADR 0004's spike measured. Qt refuses a host path whose
+version differs from the target's, so the host tools (moc, rcc, qmlcachegen,
+qsb, repc) come from the same scope as the sources — see `nix/wasm/qt.nix`, and
+`nix/ios/qt-module.nix` for the shape it is lifted from.
+
+`QT_FEATURE_thread=OFF` is passed explicitly: threads in a webview need
+`crossOriginIsolated`, which the spike could not obtain on Android WebView at
+all, and ADR 0004's size and memory budget is the single-threaded one.

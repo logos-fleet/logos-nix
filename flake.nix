@@ -239,6 +239,29 @@
       ];
       mkNativePkgs = system: import nixpkgs { inherit system; overlays = nativeOverlays; };
 
+      # QT FOR WEBASSEMBLY, built from source. TWO PINS MEET HERE, and that they
+      # are different pins is the point:
+      #
+      #   the emsdk    comes from the NATIVE pin, because a wasm image links
+      #                logos-protocol's wasm transport and a module core next to
+      #                this Qt and Emscripten's ABI is not stable across
+      #                releases (nix/wasm/overlay.nix);
+      #   the Qt       comes from `nixpkgs-windows` (6.11.1), the same pin
+      #                Windows, iOS and Android already use, because the host
+      #                tools must match the target Qt EXACTLY and 6.11.1 is the
+      #                version ADR 0004's spike measured.
+      #
+      # `import nixpkgs-windows { inherit system; }` with no overlays: this
+      # wants the BUILD platform's own Qt (moc, qmlcachegen, qsb, repc), not a
+      # cross set, and the Windows native overlay would drag wine in (see
+      # needsNativeOverlay).
+      qtWasmFor = system:
+        import ./nix/wasm/qt.nix {
+          inherit (nixpkgs) lib;
+          pkgs = mkNativePkgs system;
+          inherit (import nixpkgs-windows { inherit system; }) qt6;
+        };
+
       # Package set targeting Windows, built FROM `buildSystem`.
       #
       # Uses `nixpkgs-windows` (Qt 6.11.1), NOT the workspace pin — see the
@@ -308,6 +331,7 @@
           windowsBuildSystems
           windowsCrossSystem
           mkIosPkgs
+          qtWasmFor
           iosBuildSystems
           iosCrossSystems
           iosXcodeVersion
@@ -372,7 +396,24 @@
             libsodium
             ;
         }
-        // nixpkgs.lib.optionalAttrs (pkgs ? xcodeWrapper) { inherit (pkgs) xcodeWrapper; });
+        // nixpkgs.lib.optionalAttrs (pkgs ? xcodeWrapper) { inherit (pkgs) xcodeWrapper; })
+        # nix build .#qt-wasm                  (the whole prefix)
+        # nix build .#qt-wasm-qml-probe        (a Qt Quick image, weighed)
+        #
+        # Keyed by the BUILD system, unlike the mobile targets above: a wasm
+        # artifact is produced by an ordinary native derivation (README, "Wasm
+        # target"), so there is no wasm pseudo-system to key it under.
+        // nixpkgs.lib.genAttrs supportedSystems (system:
+          let qtWasm = qtWasmFor system; in
+          {
+            qt-wasm = qtWasm.prefix;
+            qt-wasm-qml-probe = (mkNativePkgs system).callPackage ./nix/wasm/qml-probe.nix {
+              inherit qtWasm;
+            };
+          }
+          // nixpkgs.lib.mapAttrs'
+            (n: nixpkgs.lib.nameValuePair "qt-wasm-${n}")
+            qtWasm.modules);
 
       # Drift guard for the Windows overlay.
       #
@@ -510,6 +551,112 @@
                 + " entries but lib.overlays lists " + toString (builtins.length nativeNames)
                 + " non-cross overlays (" + toString nativeNames + ")");
             pkgs.runCommand "overlay-exports-eval-gate" { } "touch $out";
+
+          # THE QT-WASM BUILD'S SHAPE, at eval.
+          #
+          # Its dangerous failures are all silent. A host-tool flag aimed at the
+          # TARGET package instead of the build platform's does not fail the
+          # configure — it drops Qt Quick from qtdeclarative (this repo's iOS and
+          # Windows overlays each document the same trap). A mkspec that stops
+          # saying wasm-emscripten produces a perfectly good NATIVE Qt. And
+          # `QT_FEATURE_thread=OFF` is the difference between the image ADR 0004
+          # budgeted and one that needs crossOriginIsolated, which the spike
+          # could not get on Android WebView at all.
+          #
+          # Eval-only, so it runs everywhere in seconds; the probe (Linux-only
+          # below, `nix build .#qt-wasm-qml-probe` on a Mac) is what proves the
+          # result links and what weighs it.
+          qt-wasm-shape =
+            let
+              qtWasm = qtWasmFor system;
+              flagsOf = m: qtWasm.modules.${m}.wasmCmakeFlags;
+              hasFlag = m: f: builtins.elem f (flagsOf m);
+              # unsafeDiscardStringContext: these become the needle of a
+              # `hasInfix`, which is a regex match, and a regex string is not
+              # allowed to carry a store-path reference.
+              wasmPaths = map (d: builtins.unsafeDiscardStringContext (toString d))
+                (lib.attrValues qtWasm.modules);
+              # A *Tools_DIR flag must name a BUILD-platform Qt. The wasm
+              # modules' own store paths are the wrong answer, and the only
+              # wrong answer that still configures.
+              hostToolFlag = m: suffix:
+                let
+                  matches = builtins.filter (lib.hasInfix "/lib/cmake/${suffix}") (flagsOf m);
+                in
+                matches != [ ]
+                && builtins.all (f: !(builtins.any (p: lib.hasInfix p f) wasmPaths)) matches;
+
+              wasmAssertions = [
+                # The same Qt every other non-desktop target uses. Pointing this
+                # at the native pin would build a 6.9.2 wasm Qt against a
+                # 6.11.1 mobile platform and nothing would say so.
+                {
+                  name = "the wasm Qt is the mobile/Windows pin's version";
+                  ok = qtWasm.version == (mkWindowsPkgs { buildSystem = "x86_64-linux"; }).qt6.qtbase.version;
+                }
+                {
+                  name = "qtbase targets the wasm mkspec";
+                  ok = hasFlag "qtbase" "-DQT_QMAKE_TARGET_MKSPEC=wasm-emscripten";
+                }
+                {
+                  name = "qtbase is single-threaded";
+                  ok = hasFlag "qtbase" "-DQT_FEATURE_thread=OFF";
+                }
+                {
+                  name = "qtdeclarative points at build-platform qsb";
+                  ok = hostToolFlag "qtdeclarative" "Qt6ShaderToolsTools";
+                }
+                {
+                  name = "qtdeclarative points at build-platform qmltyperegistrar";
+                  ok = hostToolFlag "qtdeclarative" "Qt6QmlTools";
+                }
+                {
+                  name = "qtremoteobjects points at build-platform repc";
+                  ok = hostToolFlag "qtremoteobjects" "Qt6RemoteObjectsTools";
+                }
+                # Every non-qtbase module must configure through the wasm
+                # qtbase's own toolchain file, or it is a different Qt than the
+                # one it links against.
+                {
+                  name = "the modules chainload the wasm qtbase toolchain";
+                  ok = builtins.all
+                    (m: builtins.any
+                      (lib.hasPrefix "-DCMAKE_TOOLCHAIN_FILE=${qtWasm.modules.qtbase}")
+                      (flagsOf m))
+                    [ "qtdeclarative" "qtshadertools" "qtsvg" "qtremoteobjects" ];
+                }
+                {
+                  name = "consumer flags name the joined prefix";
+                  ok = builtins.elem "-DCMAKE_PREFIX_PATH=${qtWasm.prefix}" qtWasm.cmakeFlags
+                    && builtins.elem "-DCMAKE_FIND_ROOT_PATH=${qtWasm.prefix}" qtWasm.cmakeFlags;
+                }
+                # The one a consumer cannot guess: without it find_package(Qt6
+                # COMPONENTS Qml) looks for Qt6Qml inside qtbase's prefix and
+                # reports it missing.
+                {
+                  name = "consumer flags carry QT_ADDITIONAL_PACKAGES_PREFIX_PATH";
+                  ok = builtins.elem "-DQT_ADDITIONAL_PACKAGES_PREFIX_PATH=${qtWasm.prefix}" qtWasm.cmakeFlags;
+                }
+                # ...and the host half. A consumer with a QML module needs
+                # qmlcachegen and qsb, which are BUILD-platform packages and are
+                # not in QT_HOST_PATH. Missing, the consumer's
+                # find_package(Qt6 COMPONENTS Qml) finds Qt6QmlConfig.cmake and
+                # then fails inside it.
+                {
+                  name = "consumer flags carry the host packages prefix path";
+                  ok = builtins.any (lib.hasPrefix "-DQT_HOST_PATH=") qtWasm.cmakeFlags
+                    && builtins.any
+                      (lib.hasPrefix "-DQT_ADDITIONAL_HOST_PACKAGES_PREFIX_PATH=")
+                      qtWasm.cmakeFlags;
+                }
+              ];
+              wasmGate = lib.foldl'
+                (acc: x: acc && (lib.assertMsg x.ok "qt-wasm drift: ${x.name}"))
+                true
+                wasmAssertions;
+            in
+            assert wasmGate;
+            pkgs.runCommand "qt-wasm-shape-eval-gate" { } "touch $out";
 
           # THE EMSCRIPTEN PIN, proven by using it.
           #
@@ -865,7 +1012,16 @@
           // lib.optionalAttrs (system == "x86_64-linux") {
             android-apk = a.callPackage ./nix/android/check-apk { };
           }
-        ));
+        )
+        # THE QT-WASM RUNTIME, proven by linking a Qt Quick image against it and
+        # weighing the result (nix/wasm/qml-probe.nix). Linux-only for the same
+        # reason android-apk is: it builds Qt from source, so a plain
+        # `nix flake check` on a developer's Mac must not pick it up. On a Mac
+        # it is `nix build .#qt-wasm-qml-probe`, which is what ADR 0004's
+        # aarch64-darwin half is verified with.
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          inherit (self.packages.${system}) qt-wasm-qml-probe;
+        });
 
       devShells = forAllSystems ({ pkgs, ... }: {
         default = pkgs.mkShell {
