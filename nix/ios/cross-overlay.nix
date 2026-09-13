@@ -314,11 +314,14 @@ in
       spdlogVersion = prev.spdlog.version;
       libsodiumSrc = prev.libsodium.src;
       libsodiumVersion = prev.libsodium.version;
+      curlSrc = prev.curl.src;
+      curlVersion = prev.curl.version;
     })
     spdlog
     boost
     openssl
     libsodium
+    curl
     ;
 
   nlohmann_json = final.pkgsBuildBuild.nlohmann_json;
