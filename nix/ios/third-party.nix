@@ -18,6 +18,8 @@
   spdlogVersion,
   libsodiumSrc,
   libsodiumVersion,
+  curlSrc,
+  curlVersion,
 }:
 
 let
@@ -48,7 +50,9 @@ let
     export CXXFLAGS="-O2"
   '';
 in
-{
+# `rec` for one edge only: curl links the OpenSSL defined above it. Naming the
+# same derivation twice would put two of it in the closure.
+rec {
   spdlog = xcodeClang.mkDerivation {
     pname = "spdlog-ios";
     version = spdlogVersion;
@@ -109,6 +113,46 @@ in
       make install_dev
       runHook postInstall
     '';
+  };
+
+  # libcurl, static, on the OpenSSL above.
+  #
+  # THE TLS BACKEND IS OPENSSL, not Apple's Secure Transport: curl removed that
+  # backend, and the one thing it gave a phone -- the system trust store -- is
+  # not what a package downloader reads anyway. An OpenSSL build carries no CA
+  # bundle at all, so a caller that fetches over https has to name one
+  # (CURLOPT_CAINFO); a caller that fetches a catalog off the LAN over http
+  # needs nothing. That is a property of this archive and is why it is stated
+  # here rather than discovered in a handshake.
+  #
+  # Everything optional is off. Each extra would be another hand-built iOS
+  # archive in this file (zlib, brotli, zstd, nghttp2, libpsl, libidn2,
+  # libssh2), and a downloader that GETs one file over HTTP/1.1 uses none of
+  # them.
+  curl = xcodeClang.mkDerivation {
+    pname = "curl-ios";
+    version = curlVersion;
+    src = curlSrc;
+    cmakeFlags = cmakeTargetFlags ++ [
+      # An iOS toolchain re-roots find_package/find_library at the SDK, so
+      # being on CMAKE_PREFIX_PATH is not enough -- OpenSSL has to be a ROOT.
+      "-DCMAKE_FIND_ROOT_PATH=${openssl}"
+      "-DOPENSSL_ROOT_DIR=${openssl}"
+      "-DCURL_USE_OPENSSL=ON"
+      "-DBUILD_CURL_EXE=OFF"
+      "-DBUILD_TESTING=OFF"
+      "-DBUILD_LIBCURL_DOCS=OFF"
+      "-DENABLE_CURL_MANUAL=OFF"
+      "-DCURL_USE_LIBPSL=OFF"
+      "-DCURL_USE_LIBSSH2=OFF"
+      "-DCURL_ZLIB=OFF"
+      "-DCURL_BROTLI=OFF"
+      "-DCURL_ZSTD=OFF"
+      "-DUSE_LIBIDN2=OFF"
+      "-DUSE_NGHTTP2=OFF"
+      "-DCURL_DISABLE_LDAP=ON"
+      "-DCURL_DISABLE_LDAPS=ON"
+    ];
   };
 
   libsodium = xcodeClang.mkDerivation {
