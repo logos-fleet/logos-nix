@@ -50,7 +50,7 @@ let
     export CXXFLAGS="-O2"
   '';
 in
-# `rec` for one edge only: curl links the OpenSSL built below it. Naming the
+# `rec` for one edge only: curl links the OpenSSL defined above it. Naming the
 # same derivation twice would put two of it in the closure.
 rec {
   spdlog = xcodeClang.mkDerivation {
