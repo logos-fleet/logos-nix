@@ -74,8 +74,14 @@
       # and build are part of every iOS derivation's hash via
       # nix/ios/xcode-wrapper.nix. Only aarch64-darwin can build these.
       # See nix/ios/cross-overlay.nix.
-      iosXcodeVersion = "26.6";
-      iosXcodeBuild = "17F113";
+      # Bumped when /Applications/Xcode.app is replaced (an App Store
+      # auto-update did it mid-run once, #142): read the two values off
+      # `plutil -extract CFBundleShortVersionString/ProductBuildVersion raw
+      # /Applications/Xcode.app/Contents/version.plist` and put them here.
+      # Every iOS derivation rebuilds, by design -- a different Xcode is a
+      # different compiler and a different SDK.
+      iosXcodeVersion = "27.0";
+      iosXcodeBuild = "27A266a";
       iosBuildSystems = [ "aarch64-darwin" ];
       iosCrossSystems = {
         aarch64-ios-simulator = {
